@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hft-research"
+version = "0.1.0"
+description = "Causal RL research and risk-gated paper trading"
+requires-python = ">=3.12"
+dependencies = [
+  "numpy>=1.26,<3", "pyarrow>=17,<24", "gymnasium>=1.0,<2",
+  "onnxruntime>=1.19,<2", "websockets>=14,<17",
+]
+
+[project.optional-dependencies]
+train = ["stable-baselines3>=2.4,<3", "torch>=2.4,<3", "onnx>=1.17,<2"]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+
+[project.scripts]
+hft = "hft.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["hft*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

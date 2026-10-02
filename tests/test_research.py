@@ -251,3 +251,151 @@ def test_json_infinity_is_not_explicit_infinite_profit_factor():
         "edge": {"intraday_long": {"positive": True, "lower": 0.01}},
     }
     assert not eligibility(report, synthetic=False, primary_control="intraday_long")["passed"]
+
+
+def test_profitable_stress_with_unresolved_inventory_fails_eligibility():
+    report = {
+        "policy": {
+            "sessions": 30,
+            "trades": 100,
+            "expectancy": 1,
+            "net_profit": 100,
+            "profit_factor": "infinite",
+            "gross_profit": 100,
+            "gross_loss": 0,
+            "max_drawdown": 0,
+        },
+        "stress": {"net_profit": 100, "incomplete": True},
+        "edge": {"intraday_long": {"positive": True, "lower": 0.01}},
+    }
+    result = eligibility(report, synthetic=False, primary_control="intraday_long")
+    assert not result["passed"]
+    assert "incomplete-stress-liquidation" in result["reasons"]
+
+
+@pytest.mark.parametrize("section", ["policy", "stress"])
+def test_feed_gap_sessions_cannot_pass_live_eligibility(section):
+    report = {
+        "policy": {
+            "sessions": 30,
+            "trades": 100,
+            "expectancy": 1,
+            "net_profit": 100,
+            "profit_factor": "infinite",
+            "gross_profit": 100,
+            "gross_loss": 0,
+            "max_drawdown": 0,
+        },
+        "stress": {"net_profit": 100},
+        "edge": {"intraday_long": {"positive": True, "lower": 0.01}},
+    }
+    report[section]["feed_gaps"] = 1
+    result = eligibility(report, synthetic=False, primary_control="intraday_long")
+    assert not result["passed"]
+    assert any("runtime" in reason and "feed-gap" in reason for reason in result["reasons"])
+
+
+def test_rollout_stops_at_unliquidated_session_instead_of_resetting_inventory():
+    from dataclasses import replace
+
+    import numpy as np
+
+    from hft.data import synthetic_sessions
+    from hft.research import _rollout
+
+    first, second = synthetic_sessions(days=2, bars_per_day=80)
+    # Entry can execute, but the final minute has no executable sell depth.
+    first = replace(
+        first, bid_size=np.where(first.quote_ns >= first.close_ns - 61 * 10**9, 0, first.bid_size)
+    )
+    result, _ = _rollout([first, second], lambda obs, env: 1)
+    assert result["incomplete"]
+    assert result["sessions"] == 1
+    assert result["dates"] == [first.session_id]
+    assert result["unresolved_position"] > 0
+    assert result["failure"] == "incomplete-liquidation"
+
+
+def test_evaluation_reports_incomplete_sessions_without_unpaired_edge():
+    from dataclasses import replace
+
+    import numpy as np
+
+    from hft.data import synthetic_sessions
+    from hft.research import evaluate
+
+    first, second = synthetic_sessions(days=2, bars_per_day=80)
+    first = replace(
+        first, bid_size=np.where(first.quote_ns >= first.close_ns - 61 * 10**9, 0, first.bid_size)
+    )
+    report, _ = evaluate([first, second], lambda obs: 1)
+    assert report["policy"]["incomplete"]
+    assert report["policy"]["dates"] == [first.session_id]
+    assert not report["edge"]["random"]["positive"]
+
+
+def test_rollout_never_calls_policy_during_gap_warmup():
+    from dataclasses import replace
+
+    import numpy as np
+
+    from hft.data import synthetic_sessions
+    from hft.research import evaluate
+
+    data = synthetic_sessions(days=1, bars_per_day=160)[0]
+    keep_q = (data.quote_ns < data.open_ns + 306 * 10**9) | (
+        data.quote_ns >= data.open_ns + 313 * 10**9
+    )
+    keep_t = (data.trade_ns < data.open_ns + 306 * 10**9) | (
+        data.trade_ns >= data.open_ns + 313 * 10**9
+    )
+    data = replace(
+        data,
+        **{
+            name: getattr(data, name)[keep_q]
+            for name in ("quote_ns", "bid", "ask", "bid_size", "ask_size")
+        },
+        **{name: getattr(data, name)[keep_t] for name in ("trade_ns", "trade_price", "trade_size")},
+    )
+
+    def policy(obs):
+        assert np.any(obs), "policy received a masked warmup observation"
+        return 0
+
+    report, _ = evaluate([data], policy)
+    assert report["policy"]["feed_gaps"] == 1
+    assert report["policy"]["ineligible_decisions"] > 0
+
+    # A post-gap entry can be matched. Scheduling random starts by callback
+    # count would never reach many sampled physical bar offsets after downtime.
+    traded, _ = evaluate([data], lambda obs: int(obs[13] <= 0.225))
+    assert traded["policy"]["session_fills"] == [2]
+    assert traded["random"]["matched_fill_frequency"]
+
+
+@pytest.mark.parametrize(
+    "module,field,value",
+    [
+        ("hft.features", "FEATURE_VERSION", 4),
+        ("hft.data", "AGGREGATION_VERSION", "new-causal-aggregation"),
+    ],
+)
+def test_frozen_identity_changes_with_execution_feature_contract(
+    tmp_path, monkeypatch, module, field, value
+):
+    import importlib
+    from types import SimpleNamespace
+
+    from hft.research import freeze_experiment
+
+    source = tmp_path / "dataset.json"
+    source.write_text("{}")
+    sessions = [
+        SimpleNamespace(session_id=f"{i:03d}", symbol="SPY", manifest={"synthetic": False})
+        for i in range(120)
+    ]
+    monkeypatch.setattr("hft.data.load_dataset", lambda path: sessions)
+    before = freeze_experiment(source, {}, tmp_path / "before.json")
+    monkeypatch.setattr(importlib.import_module(module), field, value)
+    after = freeze_experiment(source, {}, tmp_path / "after.json")
+    assert before["experiment_hash"] != after["experiment_hash"]

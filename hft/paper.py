@@ -7,7 +7,7 @@ from dataclasses import asdict
 from .account import Account, Costs
 from .execution import LocalExecution
 from .features import LOOKBACK, observation
-from .feed import BarAggregator, quote_from_event
+from .feed import BarAggregator, historical_timeline, quote_from_event
 from .logs import EventLog
 from .risk import RiskGateway, Snapshot
 from .sizing import SizingConfig, make_intent
@@ -56,6 +56,7 @@ class PaperEngine:
         self.session_complete = False
         self.completed_sessions = 0
         self.first_event_ns = self.last_event_ns = None
+        self._warmup_after_ns = 0
         self.last_tick_ns = None
         self._trade_count = len(self.account.trades)
         self.log.write(
@@ -85,6 +86,7 @@ class PaperEngine:
         self.history.clear()
         self.quote = None
         self.first_event_ns = self.last_event_ns = None
+        self._warmup_after_ns = session.open_ns
         self.last_tick_ns = None
         self.session_complete = now_ns is None or now_ns <= session.open_ns + NS
         self.account.session_start_equity = self.account.cash
@@ -184,6 +186,10 @@ class PaperEngine:
         )
 
     def on_bar(self, bar, now_ns):
+        # Carried bars published when an outage ends are retained by the
+        # aggregator, but cannot rebuild the policy's fresh decision warmup.
+        if bar.start_ns < self._warmup_after_ns:
+            return
         if self.history and bar.end_ns - self.history[-1].end_ns != self.bar_seconds * NS:
             self.history.clear()
             self.session_complete = False
@@ -233,6 +239,7 @@ class PaperEngine:
         self.log.write("market", event_ns=arrival_ns, payload={**event, "arrival_ns": arrival_ns})
         if self.last_event_ns is not None and arrival_ns - self.last_event_ns > 5 * NS:
             self.history.clear()
+            self._warmup_after_ns = arrival_ns
             self.session_complete = False
             self.log.write("gap", event_ns=arrival_ns, reason="feed_gap")
             if not self.submit_callback:
@@ -251,6 +258,7 @@ class PaperEngine:
             return
         if self.last_tick_ns is not None and now_ns - self.last_tick_ns > 5 * NS:
             self.history.clear()
+            self._warmup_after_ns = now_ns
             self.session_complete = False
             self.log.write("gap", event_ns=now_ns, reason="runtime_sleep")
             self.risk.halted = "runtime_gap"
@@ -343,10 +351,11 @@ def replay_sessions(engine, sessions):
 
     for data in sessions:
         engine.start_session(SessionWindow(data.session_id, data.open_ns, data.close_ns))
-        for event in data.iter_events():
-            now = event.get("arrival_ns") or event["event_ns"]
-            engine.on_event(event, now)
-        engine.tick(data.close_ns)
+        for event, now in historical_timeline(data, engine.bar_seconds):
+            if event is None:
+                engine.tick(now)
+            else:
+                engine.on_event(event, now)
         engine.end_session(complete=True)
     engine.finish(complete=False)
     return {

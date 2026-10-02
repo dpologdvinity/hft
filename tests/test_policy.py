@@ -30,6 +30,8 @@ def test_real_observation_onnx_bundle_and_tamper(tmp_path):
     env = TradingEnv(synthetic_sessions(3, 100, 1), episode_steps=64)
     model = PPO("MlpPolicy", env, n_steps=64, batch_size=32, device="cpu", seed=3)
     model.learn(total_timesteps=128)
+    while not env.done:
+        env.step(0)
     obs, _ = env.reset()
     samples = []
     for _ in range(20):
@@ -52,6 +54,17 @@ def test_real_observation_onnx_bundle_and_tamper(tmp_path):
     with pytest.raises(ValueError):
         runtime.predict(samples[0].astype(np.float64))
     manifest = json.loads((bundle / "manifest.json").read_text())
+    from copy import deepcopy
+
+    from hft.policy import contract_hash, validate_bundle
+
+    legacy = deepcopy(manifest)
+    legacy["metadata"]["feature_version"] = 2
+    legacy.pop("contract_hash")
+    legacy["contract_hash"] = contract_hash(legacy)
+    (bundle / "manifest.json").write_text(json.dumps(legacy))
+    with pytest.raises(ValueError, match="feature"):
+        validate_bundle(bundle)
     manifest["metadata"]["costs"]["slippage_bps"] = 0
     (bundle / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="contract"):

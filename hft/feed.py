@@ -70,6 +70,28 @@ def quote_from_event(event, arrival_ns=None) -> Quote:
     return Quote(str(identity), stamp, arrival_ns, bid, ask, bid_size, ask_size)
 
 
+def historical_timeline(session, bar_seconds=5):
+    """Merge causal arrivals with deterministic exchange bar-boundary timers.
+
+    A timer precedes a same-time arrival, matching BarAggregator.add's
+    publication-before-payload ordering. Actual live polling can add delay;
+    unrecorded historical network arrival times remain unknown.
+    """
+    width = bar_seconds * NS
+    timer = session.open_ns + width
+    for event in session.iter_events():
+        now = event.get("arrival_ns", event["event_ns"])
+        while timer <= min(now, session.close_ns):
+            yield None, timer
+            timer += width
+        if now >= session.close_ns:
+            break
+        yield event, now
+    while timer <= session.close_ns:
+        yield None, timer
+        timer += width
+
+
 class BarAggregator:
     def __init__(
         self,
@@ -200,7 +222,7 @@ class BarAggregator:
                 (t for t in self._trades if self.start <= t[0] < end), key=lambda t: (t[0], t[1])
             )
             quotes = [q for q in self._quotes if q.event_ns < end]
-            quote = max(quotes, key=lambda q: q.event_ns) if quotes else None
+            quote = max(reversed(quotes), key=lambda q: q.event_ns) if quotes else None
             if quote is None and self.last_quote is not None and self.last_quote.event_ns < end:
                 quote = self.last_quote
             prices = [t[2] for t in eligible]

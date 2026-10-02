@@ -91,6 +91,7 @@ def validate_config(config):
 
 
 def trial_key(experiment, fold, seed, settings):
+    from .data import AGGREGATION_VERSION
     from .features import FEATURE_NAMES, FEATURE_VERSION
 
     return canonical_hash(
@@ -101,6 +102,7 @@ def trial_key(experiment, fold, seed, settings):
             "settings": settings,
             "feature_version": FEATURE_VERSION,
             "feature_names": list(FEATURE_NAMES),
+            "aggregation_version": AGGREGATION_VERSION,
         }
     )
 
@@ -109,7 +111,14 @@ def select_champion(trials):
     eligible = []
     for candidate in sorted({t["candidate"] for t in trials}):
         rows = [t for t in trials if t["candidate"] == candidate]
-        if any(t["validation"]["max_drawdown"] >= 0.05 for t in rows):
+        if any(
+            t["validation"]["max_drawdown"] >= 0.05
+            or t["validation"].get("incomplete", False)
+            or t["validation"].get("eligible_decisions", 1) == 0
+            or not t["validation"].get("live_comparable", True)
+            or t["validation"].get("feed_gaps", 0) > 0
+            for t in rows
+        ):
             continue
         eligible.append(
             (
@@ -119,7 +128,9 @@ def select_champion(trials):
             )
         )
     if not eligible:
-        raise ValueError("no validation candidate meets drawdown limit")
+        raise ValueError(
+            "no complete validation candidate has eligible decisions and meets drawdown limit"
+        )
     candidate = max(eligible)[2]
     seeds = {t["seed"] for t in trials if t["candidate"] == candidate}
     seed = max(
@@ -351,7 +362,7 @@ def _search_impl(sessions, experiment, output, resume=False, smoke=False):
     return report
 
 
-def _search(sessions, experiment, output, resume=False, smoke=False):
+def _search(sessions, experiment, output, resume=False, smoke=False, setup_seconds=0.0):
     output = Path(output)
     budget_path = output / "budget.json"
     config = validate_config(experiment["config"])
@@ -361,6 +372,7 @@ def _search(sessions, experiment, output, resume=False, smoke=False):
         if saved["experiment_hash"] != experiment["experiment_hash"]:
             raise ValueError("search budget experiment identity changed")
         used = saved["elapsed_seconds"]
+    used += setup_seconds
     start = time.monotonic()
     experiment["_deadline"] = start + max(0.0, config["wall_seconds"] - used)
     try:
@@ -396,25 +408,80 @@ def _partial(output, trials):
 
 def run_search(experiment, output=None, resume=False):
     from .data import load_dataset
+    from .research import load_experiment, preflight_experiment
 
+    started = time.monotonic()
     path = Path(experiment)
-    manifest = json.loads(path.read_text())
-    manifest["path"] = str(path)
-    identity = {k: v for k, v in manifest.items() if k not in ("experiment_hash", "path")}
-    identity["final_test_consumed"] = False
-    if canonical_hash(identity) != manifest["experiment_hash"]:
-        raise ValueError("frozen experiment identity changed")
+    manifest = load_experiment(path)
     if manifest["status"] == "insufficient-data":
         return manifest
+    output = Path(output or path.parent / "search")
+    report_path = output / "research.json"
+    if manifest.get("final_test_consumed") and report_path.exists():
+        completed = json.loads(report_path.read_text())
+        if completed.get("status") in (
+            "paper-eligible",
+            "failed-edge",
+            "research-only",
+        ) and isinstance(completed.get("test"), dict):
+            if completed.get("experiment_hash") != manifest["experiment_hash"]:
+                raise ValueError("completed report experiment identity changed")
+            return completed
+    config = validate_config(manifest["config"])
+    used = 0.0
+    budget_path = output / "budget.json"
+    if resume and budget_path.exists():
+        budget = json.loads(budget_path.read_text())
+        if budget["experiment_hash"] != manifest["experiment_hash"]:
+            raise ValueError("search budget experiment identity changed")
+        used = budget["elapsed_seconds"]
+    deadline = started + max(0.0, config["wall_seconds"] - used)
+
+    def record_setup():
+        atomic_json(
+            budget_path,
+            {
+                "experiment_hash": manifest["experiment_hash"],
+                "elapsed_seconds": used + time.monotonic() - started,
+                "wall_seconds": config["wall_seconds"],
+            },
+        )
+
+    def trials():
+        records = [json.loads(p.read_text()) for p in output.glob("*.json")]
+        return [r for r in records if "key" in r and "checkpoint_hash" in r]
+
     source = Path(manifest["dataset_manifest"])
-    if hashlib.sha256(source.read_bytes()).hexdigest() != manifest["dataset_hash"]:
-        raise ValueError("dataset identity changed")
-    return _search(load_dataset(source), manifest, output or path.parent / "search", resume)
+    try:
+        if manifest.get("synthetic") is False and not manifest.get("final_test_consumed"):
+            coverage = preflight_experiment(path, deadline=deadline)
+            if coverage["status"] != "data-ready":
+                result = {
+                    "status": "insufficient-data",
+                    "experiment_hash": manifest["experiment_hash"],
+                    "paper_eligible": False,
+                    "trials": trials(),
+                    "eligibility": {"passed": False, "reasons": coverage["reasons"]},
+                }
+                atomic_json(output / "research.json", result)
+                record_setup()
+                return result
+        if time.monotonic() >= deadline:
+            raise TimeoutError("research wall-clock ceiling reached during setup")
+        sessions = load_dataset(source)
+        if time.monotonic() >= deadline:
+            raise TimeoutError("research wall-clock ceiling reached during dataset loading")
+    except TimeoutError:
+        record_setup()
+        return _partial(output, trials())
+    return _search(sessions, manifest, output, resume, setup_seconds=time.monotonic() - started)
 
 
 def train(
     sessions, output, timesteps=2048, candidates=1, seed=42, initial_cash=500, smoke=False, **kwargs
 ):
+    from .data import AGGREGATION_VERSION
+    from .features import FEATURE_VERSION
     from .research import make_folds, temporal_split
 
     if kwargs.keys() - {"n_envs"}:
@@ -455,6 +522,8 @@ def train(
         "config": config,
         "candidates": candidates,
         "session_ids": ids,
+        "feature_version": FEATURE_VERSION,
+        "aggregation_version": AGGREGATION_VERSION,
     }
     experiment["experiment_hash"] = canonical_hash(experiment)
     return _search(sessions, experiment, output, smoke=smoke)

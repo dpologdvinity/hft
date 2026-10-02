@@ -143,7 +143,7 @@ def test_interrupted_trials_resume_and_test_is_consumed_once(tmp_path, monkeypat
     assert evaluated.count(["4"]) == 1
     training._search(sessions, experiment, tmp_path, resume=True, smoke=True)
     assert evaluated.count(["4"]) == 1
-    checkpoint = next(tmp_path.glob("*.zip"))
+    checkpoint = tmp_path / (first["trials"][0]["key"] + ".zip")
     checkpoint.write_bytes(b"tampered")
     with pytest.raises(ValueError, match="identity"):
         training._search(sessions, experiment, tmp_path, resume=True, smoke=True)
@@ -172,3 +172,52 @@ def test_consumed_test_registry_rejects_new_output_or_changed_partitions(tmp_pat
         training.reserve_final_test(second)
     training.reserve_final_test(second | {"final_test": ["2025-01-03"]})
     training.reserve_final_test(experiment | {"synthetic": True})
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [{"incomplete": True}, {"eligible_decisions": 0}, {"live_comparable": False}, {"feed_gaps": 1}],
+)
+def test_champion_rejects_profitable_but_unusable_validation(invalid):
+    trials = [
+        {
+            "candidate": 0,
+            "seed": 42,
+            "validation": {"return": 1, "max_drawdown": 0, "turnover": 1, **invalid},
+        }
+    ]
+    with pytest.raises(ValueError, match="validation"):
+        select_champion(trials)
+
+
+@pytest.mark.parametrize("versions", [{}, {"feature_version": 2}, {"aggregation_version": "old"}])
+def test_search_rejects_legacy_frozen_execution_contract_before_loading_data(
+    tmp_path, monkeypatch, versions
+):
+    import hashlib
+    import json
+
+    from hft import training
+    from hft.data import AGGREGATION_VERSION
+    from hft.features import FEATURE_VERSION
+    from hft.research import canonical_hash
+
+    source = tmp_path / "data.json"
+    source.write_text("{}")
+    experiment = {
+        "synthetic": False,
+        "status": "frozen",
+        "final_test_consumed": False,
+        "dataset_manifest": str(source),
+        "dataset_hash": hashlib.sha256(source.read_bytes()).hexdigest(),
+    }
+    if versions:
+        experiment.update(feature_version=FEATURE_VERSION, aggregation_version=AGGREGATION_VERSION)
+        experiment.update(versions)
+    experiment["experiment_hash"] = canonical_hash(experiment)
+    path = tmp_path / "experiment.json"
+    path.write_text(json.dumps(experiment))
+    monkeypatch.setattr("hft.data.load_dataset", lambda path: [])
+    monkeypatch.setattr(training, "_search", lambda *a, **kw: {"status": "complete"})
+    with pytest.raises(ValueError, match="execution contract"):
+        training.run_search(path)

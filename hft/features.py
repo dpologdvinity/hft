@@ -1,4 +1,9 @@
-"""Version 2 causal market, account and risk observation contract."""
+"""Version 3 causal market, account and risk observation contract.
+
+The 17 feature names are preserved. Decision histories contain at most 61
+contiguous, actually published bars after the latest observed feed gap. The
+environment masks ineligible observations with zeros and prohibits decisions.
+"""
 
 import math
 
@@ -7,7 +12,7 @@ import numpy as np
 from .account import decimal
 
 LOOKBACK = 60
-FEATURE_VERSION = 2
+FEATURE_VERSION = 3
 TARGETS = (0, 1)
 FEATURE_NAMES = (
     "log_return_1",

@@ -1,6 +1,7 @@
 from decimal import Decimal as D
 
 import numpy as np
+import pytest
 
 from hft.account import Account
 from hft.calendar import SessionWindow
@@ -68,6 +69,9 @@ def test_environment_schema_seed_and_checker():
     y, _ = env.reset(seed=22)
     np.testing.assert_array_equal(x, y)
     assert x.shape == (17,) and x.dtype == np.float32 and env.action_space.n == 2
+    # Checker resets active episodes; keep its sampled probe flat. Inventory
+    # reset rejection is covered separately with a real executed entry.
+    env.action_space.seed(123)
     check_env(env, skip_render_check=True)
 
 
@@ -142,3 +146,280 @@ def test_simulation_quote_identity_matches_streaming_normalization():
     sim = Simulation(session)
     first = next(event for event in session.iter_events() if event["T"] == "q")
     assert sim._quote(0).quote_id == quote_from_event(first).quote_id
+
+
+def gap_session():
+    from dataclasses import replace
+
+    data = synthetic_sessions(days=1, bars_per_day=160)[0]
+    cut_start, cut_end = data.open_ns + 306 * NS, data.open_ns + 313 * NS
+    q = (data.quote_ns < cut_start) | (data.quote_ns >= cut_end)
+    t = (data.trade_ns < cut_start) | (data.trade_ns >= cut_end)
+    return replace(
+        data,
+        **{
+            name: getattr(data, name)[q]
+            for name in ("quote_ns", "bid", "ask", "bid_size", "ask_size")
+        },
+        **{name: getattr(data, name)[t] for name in ("trade_ns", "trade_price", "trade_size")},
+    )
+
+
+def test_historical_gap_cancels_order_and_requires_new_contiguous_warmup(tmp_path):
+    from hft.execution import Simulation
+    from hft.paper import PaperEngine
+    from hft.risk import RiskConfig
+
+    data = gap_session()
+    sim = Simulation(data, risk_config=RiskConfig(order_expiry_seconds=20), latency_ms=10000)
+    assert sim.submit_action(1).allowed
+    sim.advance_to(data.open_ns + 315 * NS)
+    assert sim.execution.pending is None
+    assert not sim.decision_eligible
+    assert sim.submit_action(1).reason == "insufficient_warmup"
+    sim.advance_to(data.open_ns + 610 * NS)
+    assert not sim.decision_eligible
+    sim.advance_to(data.open_ns + 615 * NS)
+    assert not sim.decision_eligible
+    sim.advance_to(data.open_ns + 620 * NS)
+    assert sim.decision_eligible
+    assert len(sim.history) == 61
+    assert sim.history[0].end_ns > data.open_ns + 313 * NS
+
+    paper = PaperEngine(lambda obs: 0, log_path=tmp_path / "gap.jsonl", symbol=data.symbol)
+    paper.start_session(SessionWindow(data.session_id, data.open_ns, data.close_ns))
+    for event in data.iter_events():
+        now = event.get("arrival_ns", event["event_ns"])
+        if now > data.open_ns + 620 * NS:
+            break
+        paper.on_event(event, now)
+    assert tuple(paper.history) == sim.history
+    paper.finish()
+
+
+def test_simulation_reset_uses_same_bounded_risk_history_as_stream():
+    from hft.execution import Simulation
+
+    data = synthetic_sessions(days=1, bars_per_day=160)[0]
+    sim = Simulation(data)
+    sim.reset(100)
+    assert len(sim.history) == 61
+    assert sim.history[0].end_ns == data.open_ns + 205 * NS
+
+
+def test_incomplete_episode_cannot_reset_away_held_inventory():
+    data = synthetic_sessions(days=1, bars_per_day=80)[0]
+    env = TradingEnv(data, episode_steps=2)
+    env.reset()
+    env.step(1)
+    env.simulation.execution.latency_ns = 10**15
+    _, _, _, _, info = env.step(0)
+    assert info["incomplete"]
+    held = env.account.position
+    with pytest.raises(RuntimeError, match="inventory"):
+        env.reset()
+    assert env.account.position == held
+
+
+def test_terminal_exit_refreshes_limit_using_future_actual_quotes():
+    from dataclasses import replace
+
+    data = synthetic_sessions(days=1, bars_per_day=100)[0]
+    changed = data.quote_ns >= data.open_ns + 310 * NS
+    data = replace(
+        data,
+        bid=np.where(changed, 99.5, 99.99),
+        ask=np.where(changed, 99.52, 100.01),
+        trade_price=np.full(len(data.trade_price), 100.0),
+    )
+    env = TradingEnv(data, episode_steps=2)
+    env.reset()
+    env.step(1)
+    assert env.account.position > 0
+    _, _, _, truncated, info = env.step(0)
+    assert truncated and not info["incomplete"]
+    assert env.account.position == 0
+    assert env.account.completed_trades[-1].exit_ns >= data.open_ns + 315 * NS
+    assert env.account.completed_trades[-1].pnl < 0
+
+
+def test_boundary_timer_publishes_bar_without_using_future_arrivals():
+    from dataclasses import replace
+
+    from hft.execution import Simulation
+
+    data = synthetic_sessions(days=1, bars_per_day=100)[0]
+    boundary = data.open_ns + 305 * NS
+    # Delay every event at the boundary by 200ms, within aggregator tolerance.
+    qm = data.quote_ns == boundary
+    tm = data.trade_ns == boundary
+    manifest = dict(data.manifest)
+    manifest["quote_metadata"] = {"arrival_ns": data.quote_ns + qm * 200_000_000}
+    manifest["trade_metadata"] = {"arrival_ns": data.trade_ns + tm * 200_000_000}
+    # The next quote is also delayed, so first publication is exactly +200ms.
+    manifest["quote_metadata"]["arrival_ns"][data.quote_ns == boundary + 100_000_000] += 200_000_000
+    sim = Simulation(replace(data, manifest=manifest))
+    assert sim.decision_eligible
+    assert sim.history[-1].end_ns == boundary
+    assert sim.quote.event_ns < boundary
+    before = sim.history
+    sim.advance_to(boundary + 200_000_000)
+    assert sim.decision_eligible
+    assert sim.history[-1].end_ns == boundary
+    assert sim.history == before
+
+
+def test_reset_reuses_prepared_events_without_changing_observation_or_quotes():
+    data = synthetic_sessions(days=1, bars_per_day=100)[0]
+    env = TradingEnv(data, episode_steps=2)
+    initial, _ = env.reset(seed=4)
+    prepared = env.simulation
+    env.step(0)
+    env.step(0)
+    repeated, _ = env.reset(seed=4)
+    assert env.simulation is prepared
+    np.testing.assert_array_equal(initial, repeated)
+    assert env.simulation.quote.event_ns == data.open_ns + 304900000000
+
+
+def test_atr_pause_starts_when_trade_publishes_bar_before_next_quote():
+    from dataclasses import replace
+
+    from hft.execution import Simulation
+
+    data = synthetic_sessions(days=1, bars_per_day=100)[0]
+    boundary = data.open_ns + 315 * NS
+    keep = data.quote_ns != boundary
+    prices = np.full(len(data.trade_price), 100.0)
+    prices[data.trade_ns == boundary - NS] = 110
+    data = replace(
+        data,
+        trade_price=prices,
+        **{
+            name: getattr(data, name)[keep]
+            for name in ("quote_ns", "bid", "ask", "bid_size", "ask_size")
+        },
+    )
+    sim = Simulation(data)
+    sim.advance_to(boundary + 200_000_000)
+    assert sim.risk.breaker_until == boundary + 60 * NS
+
+
+def test_environment_decision_clock_waits_for_bar_publication():
+    from dataclasses import replace
+
+    data = synthetic_sessions(days=1, bars_per_day=100)[0]
+    boundary = data.open_ns + 305 * NS
+    qarrivals = data.quote_ns.copy()
+    tarrivals = data.trade_ns.copy()
+    qarrivals[data.quote_ns == boundary] += 200_000_000
+    qarrivals[data.quote_ns == boundary + 100_000_000] += 200_000_000
+    tarrivals[data.trade_ns == boundary] += 200_000_000
+    data = replace(
+        data,
+        manifest=data.manifest
+        | {
+            "quote_metadata": {"arrival_ns": qarrivals},
+            "trade_metadata": {"arrival_ns": tarrivals},
+        },
+    )
+    env = TradingEnv(data, episode_steps=2)
+    _, info = env.reset()
+    assert info["timestamp"] == boundary
+    assert info["decision_eligible"]
+    assert env.history[-1].end_ns == boundary
+
+
+@pytest.mark.parametrize("edge", ["initial", "trailing", "trailing_late_arrival"])
+def test_session_edge_silence_counts_as_runtime_feed_gap(edge):
+    from dataclasses import replace
+
+    from hft.execution import Simulation
+
+    data = synthetic_sessions(days=1, bars_per_day=100)[0]
+    if edge == "initial":
+        q = data.quote_ns >= data.open_ns + 10 * NS
+        t = data.trade_ns >= data.open_ns + 10 * NS
+    else:
+        q = data.quote_ns < data.close_ns - 10 * NS
+        if edge == "trailing_late_arrival":
+            q[-1] = True
+        t = data.trade_ns < data.close_ns - 10 * NS
+    data = replace(
+        data,
+        **{
+            name: getattr(data, name)[q]
+            for name in ("quote_ns", "bid", "ask", "bid_size", "ask_size")
+        },
+        **{name: getattr(data, name)[t] for name in ("trade_ns", "trade_price", "trade_size")},
+    )
+    if edge == "trailing_late_arrival":
+        arrivals = data.quote_ns.copy()
+        arrivals[-1] = data.close_ns + NS
+        data = replace(data, manifest=data.manifest | {"quote_metadata": {"arrival_ns": arrivals}})
+    sim = Simulation(data)
+    sim.advance_to(data.close_ns)
+    assert sim.gap_count == 1
+
+
+@pytest.mark.parametrize("case", ["future", "equal_stamp"])
+def test_reset_quote_matches_last_valid_streaming_quote(case):
+    from dataclasses import replace
+
+    from hft.execution import Simulation
+
+    data = synthetic_sessions(days=1, bars_per_day=100)[0]
+    boundary = data.open_ns + 305 * NS
+    expected = int(np.searchsorted(data.quote_ns, boundary)) - 1
+    if case == "future":
+        arrivals = data.quote_ns.copy()
+        arrivals[expected + 1] -= 500_000_000
+        data = replace(data, manifest=data.manifest | {"quote_metadata": {"arrival_ns": arrivals}})
+    else:
+        stamps = data.quote_ns.copy()
+        stamps[expected - 1] = stamps[expected]
+        data = replace(data, quote_ns=stamps)
+    sim = Simulation(data)
+    assert sim.quote.bid == D(str(data.bid[expected]))
+    assert sim.quote.ask == D(str(data.ask[expected]))
+
+
+def test_reward_penalizes_real_intra_bar_drawdown_with_flat_endpoints():
+    from dataclasses import replace
+
+    from hft.account import Costs
+
+    data = synthetic_sessions(days=1, bars_per_day=100)[0]
+    prices = np.full(len(data.bid), 100.0)
+    k = int(np.searchsorted(data.quote_ns, data.open_ns + 306 * NS))
+    prices[k : k + 5] = 102
+    data = replace(data, bid=prices, ask=prices, trade_price=np.full(len(data.trade_price), 100.0))
+    env = TradingEnv(data, costs=Costs(0, 0), episode_steps=2)
+    env.reset()
+    env.account.execute(".4", 100, 0, data.open_ns + 305 * NS)
+    _, reward, _, _, info = env.step(1)
+    assert info["equity"] == 500
+    assert reward == pytest.approx(-1.6)
+
+
+def test_bar_quote_uses_last_arrival_for_equal_event_timestamps():
+    from hft.feed import BarAggregator
+
+    start = 100 * NS
+    agg = BarAggregator("SPY", session=SessionWindow("day", start, start + 10 * NS))
+    agg.add({"T": "t", "S": "SPY", "event_ns": start + NS, "p": 100, "s": 1})
+    for identity, price in [("first", 100), ("latest", 101)]:
+        agg.add(
+            {
+                "T": "q",
+                "S": "SPY",
+                "event_ns": start + 4900000000,
+                "i": identity,
+                "bp": price,
+                "ap": price + 0.02,
+                "bs": 1,
+                "as": 1,
+            }
+        )
+    bar = agg.advance_to(start + 5 * NS)[0]
+    assert bar.bid == 101 and bar.ask == 101.02

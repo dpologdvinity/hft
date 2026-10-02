@@ -177,12 +177,12 @@ stay flat overnight to avoid unsupported split/dividend position accounting.
 
 ## 6. Observation and actions
 
-Feature schema v2 has 17 float32 values in this exact order:
+Feature schema v3 has 17 float32 values in this exact order:
 
 1. Log close returns over 1, 5, 15, and 60 completed bars (four values).
 2. Signed candle body/range, upper wick/range, lower wick/range.
 3. Relative spread `(ask-bid)/mid`, quote-size imbalance, trailing 60-bar
-   volume-weighted close deviation.
+   trade-volume-weighted price deviation.
 4. Inventory as held notional / strategy equity, unrealized net PnL /
    strategy equity, free non-borrowed cash / strategy equity.
 5. Remaining regular-session fraction using the actual calendar.
@@ -195,6 +195,14 @@ before the first signal (305 seconds at five-second resolution). Training
 and runtime use the identical function and warmup. No whole-dataset fitted
 normalization, return clipping based on future statistics, or future labels
 in observations. Reject nonfinite features.
+
+The v3 contract bounds history to the most recent 61 contiguous, causally
+published bars. Five-second timer boundaries publish replay bars even without a
+new payload; a timer precedes a same-time arrival. Observed feed gaps reset warmup
+and cancel pending simulation orders. Such sessions cannot qualify because the
+streaming runtime stops after five seconds without a symbol event. Development
+preflight checks this before fitting and never opens reserved final-test partitions.
+Historical arrival latency remains unknown when the source did not record it.
 
 Discrete actions: `0 = flat`, `1 = hold/enter long`. On a flat-to-long
 transition, size to at most 10% of session-start reconciled strategy equity. On `1` while

@@ -80,7 +80,8 @@ def is_real_executable(session):
 
 
 def freeze_experiment(dataset_manifest, config, output):
-    from .data import load_dataset
+    from .data import AGGREGATION_VERSION, load_dataset
+    from .features import FEATURE_VERSION
     from .training import validate_config
 
     source = Path(dataset_manifest).resolve()
@@ -95,6 +96,8 @@ def freeze_experiment(dataset_manifest, config, output):
         "session_ids": ids,
         "config": config,
         "final_test_consumed": False,
+        "feature_version": FEATURE_VERSION,
+        "aggregation_version": AGGREGATION_VERSION,
         "symbol": sessions[0].symbol if sessions else None,
         "synthetic": any(s.manifest.get("synthetic", False) for s in sessions),
         "feed": sessions[0].manifest.get("feed", "unknown") if sessions else "unknown",
@@ -132,6 +135,125 @@ def freeze_experiment(dataset_manifest, config, output):
     return result
 
 
+def load_experiment(path):
+    """Validate the frozen identity without opening any market partitions."""
+    from .data import AGGREGATION_VERSION
+    from .features import FEATURE_VERSION
+
+    path = Path(path)
+    manifest = json.loads(path.read_text())
+    if (
+        manifest.get("feature_version") != FEATURE_VERSION
+        or manifest.get("aggregation_version") != AGGREGATION_VERSION
+    ):
+        raise ValueError("incompatible frozen execution contract; freeze a new experiment")
+    identity = {k: v for k, v in manifest.items() if k != "experiment_hash"}
+    identity["final_test_consumed"] = False
+    if canonical_hash(identity) != manifest["experiment_hash"]:
+        raise ValueError("frozen experiment identity changed")
+    source = Path(manifest["dataset_manifest"])
+    if hashlib.sha256(source.read_bytes()).hexdigest() != manifest["dataset_hash"]:
+        raise ValueError("dataset identity changed")
+    return manifest | {"path": str(path)}
+
+
+def preflight_experiment(path, *, deadline=float("inf")):
+    """Check development decision coverage before fitting; never open final-test data.
+
+    Stop at the first unusable session, since one runtime hard-stop gap already
+    prevents the frozen experiment from qualifying. Partial coverage is explicit.
+    This establishes data usability, never profitability or trading eligibility.
+    """
+    from .data import checksum, load_session
+    from .execution import Simulation
+    from .features import FEATURE_VERSION
+
+    manifest = load_experiment(path)
+    source = Path(manifest["dataset_manifest"])
+    development = manifest.get("development", [])
+    if len(development) != len(set(development)) or set(development) & set(
+        manifest.get("final_test", [])
+    ):
+        raise ValueError("invalid development partition")
+    entries = json.loads(source.read_text()).get("sessions", [])
+    by_id = {entry["session_id"]: entry for entry in entries}
+    if len(entries) != len(by_id) or any(date not in by_id for date in development):
+        raise ValueError("invalid dataset session index")
+    result = {
+        "experiment_hash": manifest["experiment_hash"],
+        "feature_version": FEATURE_VERSION,
+        "aggregation_version": manifest["aggregation_version"],
+        "status": "data-ready",
+        "paper_eligible": False,
+        "eligible_decisions": 0,
+        "ineligible_decisions": 0,
+        "feed_gaps": 0,
+        "coverage_sessions": 0,
+        "development_sessions": len(development),
+        "coverage_complete": False,
+        "live_comparable": True,
+        "sessions": [],
+        "reasons": [] if development else ["insufficient-history"],
+    }
+    for date in development:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("research wall-clock ceiling reached during data preflight")
+        entry = by_id[date]
+        target = (source.parent / entry["manifest"]).resolve()
+        if not target.is_relative_to(source.parent.resolve()):
+            raise ValueError("session manifest escapes dataset")
+        if checksum(target) != entry["sha256"]:
+            raise ValueError("session manifest checksum mismatch")
+        session = load_session(target)
+        identity = {
+            k: v
+            for k, v in session.manifest.items()
+            if k not in ("quote_metadata", "trade_metadata")
+        }
+        if (
+            session.session_id != date
+            or canonical_hash(identity) != manifest["session_hashes"][date]
+        ):
+            raise ValueError("session identity changed")
+        row = {"date": date, "eligible_decisions": 0, "ineligible_decisions": 0, "feed_gaps": 0}
+        if not is_real_executable(session) and not manifest.get("synthetic"):
+            result["reasons"].append("unverified-data-provenance")
+        try:
+            simulation = Simulation(session)
+        except ValueError as exc:
+            if str(exc) != "insufficient session warmup":
+                raise
+            result["reasons"].append("insufficient-decision-warmup")
+        else:
+            for next_bar in simulation.bars[61:]:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("research wall-clock ceiling reached during data preflight")
+                key = (
+                    "eligible_decisions" if simulation.decision_eligible else "ineligible_decisions"
+                )
+                row[key] += 1
+                simulation.advance_to(next_bar.end_ns)
+            row["feed_gaps"] = simulation.gap_count
+            if row["feed_gaps"]:
+                result["reasons"].append("runtime-feed-gap")
+            if not row["eligible_decisions"]:
+                result["reasons"].append("insufficient-decision-warmup")
+            del simulation
+        del session
+        result["sessions"].append(row)
+        result["coverage_sessions"] += 1
+        for key in ("eligible_decisions", "ineligible_decisions", "feed_gaps"):
+            result[key] += row[key]
+        if result["reasons"]:
+            break
+    result["coverage_complete"] = result["coverage_sessions"] == len(development)
+    result["reasons"] = list(dict.fromkeys(result["reasons"]))
+    if result["reasons"]:
+        result.update(status="insufficient-data", live_comparable=False)
+    atomic_json(Path(path).parent / "diagnostics.json", result)
+    return result
+
+
 def ema(values, span):
     values = np.asarray(values, dtype=float)
     if not len(values):
@@ -156,6 +278,9 @@ def _rollout(sessions, policy, costs=None, initial_cash=500, latency_ms=75, dead
     latencies = []
     session_fills = []
     incomplete = False
+    dates = []
+    unresolved_position = 0.0
+    eligible_decisions = ineligible_decisions = feed_gaps = 0
     previous_risk = None
     for session in sessions:
         env = TradingEnv(
@@ -175,8 +300,11 @@ def _rollout(sessions, policy, costs=None, initial_cash=500, latency_ms=75, dead
             if time.monotonic() >= deadline:
                 env.close()
                 raise TimeoutError("research wall-clock ceiling reached")
-            observations.append(obs.copy())
-            action = int(policy(obs, env))
+            if getattr(env.simulation, "decision_eligible", True):
+                observations.append(obs.copy())
+                action = int(policy(obs, env))
+            else:
+                action = 0
             obs, _, terminated, truncated, info = env.step(action)
             quote_marks = getattr(env.simulation, "equity_curve", [])
             curve.extend(quote_marks[quote_marks_seen:])
@@ -185,6 +313,7 @@ def _rollout(sessions, policy, costs=None, initial_cash=500, latency_ms=75, dead
             done = terminated or truncated
         previous_risk = env.simulation.risk.state_dict()
         daily.append(float(info["equity"]))
+        dates.append(session.session_id)
         pnl.extend(float(t.pnl) for t in env.account.completed_trades)
         fills += len(env.account.fills)
         session_fills.append(len(env.account.fills))
@@ -193,22 +322,42 @@ def _rollout(sessions, policy, costs=None, initial_cash=500, latency_ms=75, dead
         unfilled += info.get("unfilled", 0)
         latencies.extend(info.get("latencies", []))
         incomplete |= info.get("incomplete", False)
+        eligible_decisions += info.get("eligible_decisions", 0)
+        ineligible_decisions += info.get("ineligible_decisions", 0)
+        feed_gaps += info.get("feed_gaps", 0)
+        unresolved_position = float(info.get("position", 0))
         env.close()
+        if incomplete:
+            break
     result = metrics(daily, pnl, curve)
     result.update(
         daily_equity=daily[1:],
-        dates=[s.session_id for s in sessions],
+        dates=dates,
         fills=fills,
         session_fills=session_fills,
         turnover=turnover,
         rejects=rejects,
         unfilled_orders=unfilled,
         incomplete=incomplete,
+        live_comparable=feed_gaps == 0 and not incomplete,
+        unresolved_position=unresolved_position,
+        failure=(
+            "incomplete-liquidation"
+            if incomplete
+            else "insufficient-decision-warmup"
+            if eligible_decisions == 0
+            else None
+        ),
+        eligible_decisions=eligible_decisions,
+        ineligible_decisions=ineligible_decisions,
+        feed_gaps=feed_gaps,
         latency_ms={
             str(p): float(np.percentile(latencies, p)) if latencies else None for p in (50, 95, 99)
         },
     )
-    return result, np.asarray(observations, dtype=np.float32)
+    from .features import FEATURE_NAMES
+
+    return result, np.asarray(observations, dtype=np.float32).reshape(-1, len(FEATURE_NAMES))
 
 
 def evaluate(
@@ -239,16 +388,16 @@ def evaluate(
     random_results = []
     for random_seed in range(seed, seed + 20):
         rng = np.random.default_rng(random_seed)
-        session_index = {s.session_id: i for i, s in enumerate(sessions)}
+        session_fills = dict(zip(agent["dates"], agent["session_fills"], strict=True))
 
         state = {}
 
-        def random_policy(obs, env, rng=rng, session_index=session_index, state=state):
+        def random_policy(obs, env, rng=rng, session_fills=session_fills, state=state):
             # Randomize eligible decision times, then count actual executions. Entry
             # attempts that fail safety are never reported as matching fills.
             sid = env.session.session_id
             if sid not in state:
-                target = agent["session_fills"][session_index[sid]]
+                target = session_fills.get(sid, 0)
                 cycles = target // 2
                 eligible = max(0, env.remaining_steps - 15)
                 slots = np.linspace(0, eligible, cycles + 1, dtype=int)
@@ -257,14 +406,13 @@ def evaluate(
                     for i in range(cycles)
                 ]
                 state[sid] = {
-                    "decision": 0,
+                    "start_index": env.index,
                     "starts": starts,
                     "exit_at": None,
                     "hold_bars": int(rng.integers(1, 6)),
                 }
             current = state[sid]
-            decision = current["decision"]
-            current["decision"] += 1
+            decision = env.index - current["start_index"]
             if float(env.account.position) > 0:
                 if current["exit_at"] is None:
                     if current["starts"]:
@@ -278,14 +426,20 @@ def evaluate(
 
         result, _ = _rollout(sessions, random_policy, costs, initial_cash, deadline=deadline)
         random_results.append(result)
-    random_mean = np.mean([r["daily_returns"] for r in random_results], axis=0)
+    random_aligned = all(r["dates"] == agent["dates"] for r in random_results)
+    random_mean = (
+        np.mean([r["daily_returns"] for r in random_results], axis=0)
+        if random_aligned
+        else np.array([])
+    )
     random_control = {
         "daily_returns": random_mean.tolist(),
         "seeds": list(range(seed, seed + 20)),
         "runs": random_results,
-        "matched_fill_frequency": all(
-            r["session_fills"] == agent["session_fills"] for r in random_results
-        ),
+        "dates": agent["dates"] if random_aligned else [],
+        "incomplete": any(r["incomplete"] for r in random_results),
+        "matched_fill_frequency": random_aligned
+        and all(r["session_fills"] == agent["session_fills"] for r in random_results),
         "target_session_fills": agent["session_fills"],
         "net_profit": float(np.mean([r["net_profit"] for r in random_results])),
     }
@@ -299,7 +453,18 @@ def evaluate(
         },
         **controls,
         "edge": {
-            n: paired_bootstrap(agent["daily_returns"], r["daily_returns"], seed)
+            n: (
+                paired_bootstrap(agent["daily_returns"], r["daily_returns"], seed)
+                if not agent["incomplete"]
+                and not r.get("incomplete", False)
+                and agent["dates"] == r["dates"]
+                else {
+                    "positive": False,
+                    "lower": None,
+                    "upper": None,
+                    "reason": "incomplete-or-unaligned-sessions",
+                }
+            )
             for n, r in controls.items()
         },
     }
@@ -357,6 +522,12 @@ def eligibility(report, *, synthetic, primary_control, real_executable_data=None
         "nonpositive-stress-profit": report["stress"]["net_profit"] > 0,
         "failed-control-edge": edge.get("positive") is True and finite(lower) and lower > 0,
         "incomplete-liquidation": not policy.get("incomplete", False),
+        "incomplete-stress-liquidation": not report["stress"].get("incomplete", False),
+        "runtime-feed-gap": policy.get("feed_gaps", 0) == 0 and policy.get("live_comparable", True),
+        "runtime-stress-feed-gap": report["stress"].get("feed_gaps", 0) == 0
+        and report["stress"].get("live_comparable", True),
+        "incomplete-primary-control": not report.get(primary_control, {}).get("incomplete", False),
+        "insufficient-decision-warmup": policy.get("eligible_decisions", 1) > 0,
         "unmatched-random-control": report.get("random", {}).get("matched_fill_frequency", True),
     }
     reasons = [reason for reason, passed in checks.items() if not passed]

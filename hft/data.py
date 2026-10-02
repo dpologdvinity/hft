@@ -19,7 +19,7 @@ import pyarrow.parquet as pq
 
 NY = ZoneInfo("America/New_York")
 NS = 1_000_000_000
-AGGREGATION_VERSION = "causal-5s-v2-close-conditions-250ms"
+AGGREGATION_VERSION = "causal-5s-v3-boundary-timers-latest-quote-250ms"
 MAX_SESSION_BYTES = 2 * 1024**3
 MAX_DATASET_BYTES = 6 * 1024**3
 MAX_WORKING_BYTES = 8 * 1024**3
@@ -301,7 +301,7 @@ class SessionData:
 
 def build_bars(session: SessionData, seconds: int = 5) -> tuple[Bar, ...]:
     from .calendar import SessionWindow
-    from .feed import BarAggregator
+    from .feed import BarAggregator, historical_timeline
 
     a = BarAggregator(
         session.symbol,
@@ -309,9 +309,8 @@ def build_bars(session: SessionData, seconds: int = 5) -> tuple[Bar, ...]:
         SessionWindow(session.session_id, session.open_ns, session.close_ns),
     )
     bars = []
-    for event in session.iter_events():
-        bars.extend(a.add(event))
-    bars.extend(a.advance_to(session.close_ns))
+    for event, now in historical_timeline(session, seconds):
+        bars.extend(a.advance_to(now) if event is None else a.add(event, now))
     return tuple(bars)
 
 

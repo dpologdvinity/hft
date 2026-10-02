@@ -8,8 +8,8 @@ import numpy as np
 
 from .account import Account, Costs, Execution, decimal
 from .calendar import SessionWindow
-from .data import build_bars
-from .feed import quote_from_event
+from .features import LOOKBACK
+from .feed import BarAggregator, historical_timeline, quote_from_event
 from .risk import RiskConfig, RiskDecision, RiskGateway, Snapshot
 from .sizing import OrderIntent, SizingConfig, make_intent
 
@@ -194,11 +194,7 @@ class Simulation:
         sizing_config = sizing_config or SizingConfig()
         self.data = session
         self._arrival = getattr(session, "quote_arrival_ns", None)
-        self._available = (
-            session.quote_ns
-            if self._arrival is None
-            else np.maximum(session.quote_ns, self._arrival)
-        )
+        self._available = session.quote_ns if self._arrival is None else self._arrival
         self._qorder = np.argsort(self._available, kind="stable")
         self._ordered_available = self._available[self._qorder]
         self.session = SessionWindow(session.session_id, session.open_ns, session.close_ns, None)
@@ -209,8 +205,55 @@ class Simulation:
             sizing_config, fee_per_share=costs.commission, slippage_bps=costs.slippage_bps
         )
         self.latency_ms = latency_ms
-        self.bars = build_bars(session)
+        # Capture actual publication times: an event-arrival gap must never make
+        # a later-published bar available to an earlier historical decision.
+        aggregator = BarAggregator(session.symbol, session=self.session)
+        bars, ready, gaps = [], [], []
+        last_event = session.open_ns
+        for event, now in historical_timeline(session):
+            if event is None:
+                completed = aggregator.advance_to(now)
+            else:
+                if now - last_event > 5 * NS:
+                    gaps.append(now)
+                last_event = now
+                completed = aggregator.add(event, now)
+            bars.extend(completed)
+            ready.extend([now] * len(completed))
+        if session.close_ns - last_event > 5 * NS:
+            gaps.append(session.close_ns)
+        self.bars = tuple(bars)
+        self._bar_ready_ns = np.asarray(ready, dtype=np.int64)
+        self._bar_end_ns = np.asarray([b.end_ns for b in bars], dtype=np.int64)
+        self._gap_ns = np.asarray(gaps, dtype=np.int64)
+        self._risk_event_ns = np.unique(np.concatenate((self._bar_ready_ns, self._gap_ns)))
         self.reset()
+
+    @property
+    def decision_eligible(self):
+        return len(self.history) >= LOOKBACK + 1
+
+    def _update_history(self, now_ns):
+        gap_count = int(np.searchsorted(self._gap_ns, now_ns, side="right"))
+        if gap_count > self.gap_count:
+            self.execution.cancel()
+        self.gap_count = gap_count
+        after = int(self._gap_ns[gap_count - 1]) if gap_count else self.session.open_ns
+        end = int(np.searchsorted(self._bar_ready_ns, now_ns, side="right"))
+        key = (end, gap_count)
+        if key == self._history_key:
+            return
+        self._history_key = key
+        start = max(
+            end - LOOKBACK - 1, int(np.searchsorted(self._bar_end_ns, after + 5 * NS, side="left"))
+        )
+        # Missing-context intervals also break continuity, just as on_bar does.
+        rows = self.bars[start:end]
+        for i in range(len(rows) - 1, 0, -1):
+            if rows[i].end_ns - rows[i - 1].end_ns != 5 * NS:
+                rows = rows[i:]
+                break
+        self.history = tuple(rows)
 
     def _quote(self, index):
         d = self.data
@@ -240,17 +283,24 @@ class Simulation:
         self.execution = LocalExecution(self.account, self.risk, self.latency_ms)
         self.index = start_bar
         self.now_ns = self.bars[start_bar].end_ns
-        self.history = tuple(self.bars[: start_bar + 1])
+        self.gap_count = 0
+        self._history_key = None
+        self._update_history(self.now_ns)
+        self._ri = int(np.searchsorted(self._risk_event_ns, self.now_ns, side="right"))
         self._qi = int(np.searchsorted(self._ordered_available, self.now_ns, side="left"))
         eligible = self._qorder[: self._qi]
-        latest = int(eligible[np.argmax(self.data.quote_ns[eligible])]) if len(eligible) else None
+        eligible = eligible[self.data.quote_ns[eligible] <= self._available[eligible] + 250_000_000]
+        latest = None
+        if len(eligible):
+            stamps = self.data.quote_ns[eligible]
+            latest = int(eligible[np.flatnonzero(stamps == stamps.max())[-1]])
         self.quote = self._quote(latest) if latest is not None else None
         self.risk.observe(self.snapshot(), self.now_ns)
         self.equity_curve = [float(self.snapshot().equity)]
         return self.snapshot()
 
     def snapshot(self):
-        mark = self.quote.mid if self.quote is not None else decimal(self.history[-1].close)
+        mark = self.quote.mid if self.quote is not None else decimal(self.bars[self.index].close)
         return Snapshot(
             self.quote,
             self.session,
@@ -261,12 +311,15 @@ class Simulation:
             self.history,
         )
 
-    def submit_action(self, action, now_ns=None):
+    def submit_action(self, action, now_ns=None, *, liquidate=False):
         now = self.now_ns if now_ns is None else int(now_ns)
         decision = self.risk.observe(self.snapshot(), now)
         if decision.requires_flatten:
             action = 0
-            self.execution.cancel()
+            if self.execution.pending is not None and self.execution.pending.side == "buy":
+                self.execution.cancel()
+        elif not self.decision_eligible and not (liquidate and action == 0):
+            return RiskDecision(False, "insufficient_warmup")
         if self.execution.pending is not None:
             return RiskDecision(False, "order_outstanding")
         if self.quote is None:
@@ -278,48 +331,69 @@ class Simulation:
             self.sizing_config,
             now,
             symbol=self.data.symbol,
-            emergency=decision.requires_flatten,
+            emergency=decision.requires_flatten or liquidate,
         )
         if intent is None:
             return decision
         return self.execution.submit(intent, self.snapshot(), now)
 
+    def _observe_risk(self, now_ns):
+        decision = self.risk.observe(self.snapshot(), now_ns)
+        if decision.requires_flatten:
+            if self.execution.pending is not None and self.execution.pending.side == "buy":
+                self.execution.cancel()
+            if self.execution.pending is None:
+                self.submit_action(0, now_ns)
+
     def advance_to(self, next_decision_ns):
         if next_decision_ns < self.now_ns:
             raise ValueError("simulation clock cannot go backward")
-        while (
-            self._qi < len(self.data.quote_ns)
-            and int(self._ordered_available[self._qi]) < next_decision_ns
-        ):
+        while True:
+            quote_time = (
+                int(self._ordered_available[self._qi])
+                if self._qi < len(self._ordered_available)
+                else next_decision_ns
+            )
+            risk_time = (
+                int(self._risk_event_ns[self._ri])
+                if self._ri < len(self._risk_event_ns)
+                else next_decision_ns
+            )
+            if min(quote_time, risk_time) >= next_decision_ns:
+                break
+            if risk_time <= quote_time:
+                self._ri += 1
+                self.now_ns = risk_time
+                self._update_history(risk_time)
+                self._observe_risk(risk_time)
+                continue
             quote = self._quote(int(self._qorder[self._qi]))
             self._qi += 1
-            now = max(quote.event_ns, quote.arrival_ns or quote.event_ns)
+            now = quote.arrival_ns if quote.arrival_ns is not None else quote.event_ns
+            self._update_history(now)
+            if quote.event_ns > now + 250_000_000:
+                continue
             if self.quote is not None and quote.event_ns < self.quote.event_ns:
                 continue
             self.quote = quote
             while self.index + 1 < len(self.bars) and self.bars[self.index + 1].end_ns <= now:
                 self.index += 1
-                self.history = tuple(self.bars[: self.index + 1])
             self.now_ns = now
-            decision = self.risk.observe(self.snapshot(), now)
-            if decision.requires_flatten:
-                if self.execution.pending is not None and self.execution.pending.side == "buy":
-                    self.execution.cancel()
-                if self.execution.pending is None:
-                    self.submit_action(0, now)
+            self._observe_risk(now)
             self.execution.on_quote(quote, now, self.history, self.session)
             self.equity_curve.append(float(self.snapshot().equity))
         self.now_ns = int(next_decision_ns)
+        self._update_history(self.now_ns)
         while (
             self.index + 1 < len(self.bars) and self.bars[self.index + 1].end_ns <= next_decision_ns
         ):
             self.index += 1
-            self.history = tuple(self.bars[: self.index + 1])
         if (
             self.execution.pending is not None
             and self.now_ns - self.execution.pending.created_ns
             >= int(self.risk.config.order_expiry_seconds * NS)
         ):
             self.execution.cancel()
-        self.risk.observe(self.snapshot(), self.now_ns)
+        self._observe_risk(self.now_ns)
+        self._ri = int(np.searchsorted(self._risk_event_ns, self.now_ns, side="right"))
         return self.snapshot()

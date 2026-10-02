@@ -221,6 +221,14 @@ the first eligible fresh quote at or after that due time, never against the
 decision's historical bar close. Replay every intervening quote to the
 next decision. Buys use ask plus adverse slippage; sells use bid minus
 adverse slippage. Respect displayed size, remaining quantity and expiry.
+Local simulation limits round buys up and sells down at the configured price
+precision, allowing at most one precision unit beyond the slippage boundary
+to keep unchanged off-grid quotes executable. Actual simulated fill prices
+remain bid/ask plus the exact adverse slippage, and sizing reserves cash using
+the rounded buy limit. Remote broker limits retain the separately specified
+buy-down/sell-up tick rounding so an actual submitted limit never exceeds its
+configured maximum fill bound.
+
 Do not claim queue-position realism for passive orders; v1 attempts
 marketable limit orders and treats non-crossing orders as unfilled.
 

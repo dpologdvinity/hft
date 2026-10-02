@@ -8,7 +8,8 @@ import numpy as np
 
 from .account import Account, Costs, Execution, decimal
 from .calendar import SessionWindow
-from .data import Quote, build_bars
+from .data import build_bars
+from .feed import quote_from_event
 from .risk import RiskConfig, RiskDecision, RiskGateway, Snapshot
 from .sizing import OrderIntent, SizingConfig, make_intent
 
@@ -214,15 +215,21 @@ class Simulation:
     def _quote(self, index):
         d = self.data
         arrival = int(self._arrival[index]) if self._arrival is not None else None
-        return Quote(
-            f"{d.session_id}:{index}",
-            int(d.quote_ns[index]),
-            arrival,
-            decimal(d.bid[index]),
-            decimal(d.ask[index]),
-            decimal(d.bid_size[index]),
-            decimal(d.ask_size[index]),
+        metadata = d.manifest.get("quote_metadata", {})
+        event = {}
+        for name in ("i", "quote_id", "bx", "ax"):
+            if name in metadata:
+                value = metadata[name][index]
+                event[name] = value.as_py() if hasattr(value, "as_py") else value
+        event.update(
+            event_ns=int(d.quote_ns[index]),
+            bp=decimal(d.bid[index]),
+            ap=decimal(d.ask[index]),
+            bs=decimal(d.bid_size[index]),
+            sizes_in_shares=True,
         )
+        event["as"] = decimal(d.ask_size[index])
+        return quote_from_event(event, arrival)
 
     def reset(self, start_bar=60):
         if not 60 <= start_bar < len(self.bars):
@@ -238,6 +245,7 @@ class Simulation:
         latest = int(eligible[np.argmax(self.data.quote_ns[eligible])]) if len(eligible) else None
         self.quote = self._quote(latest) if latest is not None else None
         self.risk.observe(self.snapshot(), self.now_ns)
+        self.equity_curve = [float(self.snapshot().equity)]
         return self.snapshot()
 
     def snapshot(self):
@@ -299,6 +307,7 @@ class Simulation:
                 if self.execution.pending is None:
                     self.submit_action(0, now)
             self.execution.on_quote(quote, now, self.history, self.session)
+            self.equity_curve.append(float(self.snapshot().equity))
         self.now_ns = int(next_decision_ns)
         while (
             self.index + 1 < len(self.bars) and self.bars[self.index + 1].end_ns <= next_decision_ns

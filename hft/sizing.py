@@ -57,7 +57,7 @@ def make_intent(action, account, quote, limits, now_ns, *, symbol="SPY", emergen
     buy = action == 1
     slip = decimal(limits.slippage_bps) / 10000
     price = (quote.ask * (1 + slip) if buy else quote.bid * (1 - slip)).quantize(
-        decimal(limits.price_precision), rounding=ROUND_DOWN if buy else ROUND_UP
+        decimal(limits.price_precision), rounding=ROUND_UP if buy else ROUND_DOWN
     )
     if buy:
         budget = min(

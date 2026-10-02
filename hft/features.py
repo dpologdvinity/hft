@@ -47,7 +47,7 @@ def observation(history, account, risk_state, session_window, *, now_ns=None, qu
     ]
     tail = history[-60:]
     volume = sum(r.volume for r in tail)
-    vwap = sum(r.close * r.volume for r in tail) / volume if volume else b.close
+    vwap = sum(r.vwap * r.volume for r in tail) / volume if volume else b.close
     depth = b.bid_size + b.ask_size
     micro = [
         (b.ask - b.bid) / b.mid,

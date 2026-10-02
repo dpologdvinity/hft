@@ -90,3 +90,15 @@ def test_feature_streaming_deque_matches_historical_tuple():
         observation(bars[:61], account, risk, window),
         observation(deque(streamed[:61]), account, risk, window),
     )
+
+
+def test_trailing_vwap_uses_trade_weighted_bar_prices():
+    session = synthetic_sessions(days=1, bars_per_day=80)[0]
+    rows = list(build_bars(session))[:61]
+    rows = [replace(b, volume=1, close=100, open=100, high=110, low=90, vwap=90) for b in rows]
+    rows[-1] = replace(rows[-1], volume=118, vwap=110)
+    a = Account(500)
+    window = SessionWindow(session.session_id, session.open_ns, session.close_ns, None)
+    x = observation(rows, a, RiskGateway(), window)
+    expected_vwap = (59 * 90 + 118 * 110) / 177
+    assert x[9] == pytest.approx(100 / expected_vwap - 1, abs=1e-8)

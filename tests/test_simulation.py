@@ -110,3 +110,35 @@ def test_simulator_does_not_discard_not_yet_arrived_quote():
     sim.advance_to(decision + 800_000_000)
     assert sim.now_ns == decision + 800_000_000
     assert sim.quote.arrival_ns < sim.now_ns
+
+
+def test_equity_curve_retains_intra_bar_price_excursion():
+    from dataclasses import replace
+
+    from hft.execution import Simulation
+
+    data = synthetic_sessions(days=1, bars_per_day=80)[0]
+    decision = data.open_ns + 305 * NS
+    bid = np.full(len(data.bid), 99.999999)
+    ask = np.full(len(data.ask), 100.012345)
+    k = int(np.searchsorted(data.quote_ns, decision + NS))
+    bid[k : k + 5] = 101.999999
+    ask[k : k + 5] = 102.012345
+    data = replace(data, bid=bid, ask=ask, trade_price=np.full(len(data.trade_price), 100.0))
+    sim = Simulation(data)
+    sim.submit_action(1)
+    sim.advance_to(decision + 5 * NS)
+    assert len(sim.equity_curve) > 2
+    assert max(sim.equity_curve) > float(sim.snapshot().equity) + 0.5
+    assert sim.equity_curve[0] == 500
+    assert sim.equity_curve[-1] == float(sim.snapshot().equity)
+
+
+def test_simulation_quote_identity_matches_streaming_normalization():
+    from hft.execution import Simulation
+    from hft.feed import quote_from_event
+
+    session = synthetic_sessions(days=1, bars_per_day=80)[0]
+    sim = Simulation(session)
+    first = next(event for event in session.iter_events() if event["T"] == "q")
+    assert sim._quote(0).quote_id == quote_from_event(first).quote_id

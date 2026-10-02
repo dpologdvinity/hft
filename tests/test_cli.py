@@ -33,3 +33,13 @@ def test_data_probe_without_credentials_is_actionable():
     result = command("data-probe", "--symbol", "AAPL", "--session", "2026-09-28")
     assert result.returncode != 0
     assert "ALPACA" in result.stderr
+
+
+def test_report_preserves_insufficient_history_result(tmp_path):
+    import json
+
+    path = tmp_path / "experiment.json"
+    path.write_text(json.dumps({"status": "insufficient-data", "reasons": ["need more sessions"]}))
+    result = command("report", "--experiment", str(path))
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["status"] == "insufficient-data"

@@ -153,6 +153,11 @@ def _handle(args):
             if args.experiment.name == "research.json"
             else args.experiment.parent / "search" / "research.json"
         )
+        if not path.exists() and args.experiment.exists():
+            frozen = json.loads(args.experiment.read_text())
+            if frozen.get("status") == "insufficient-data":
+                return frozen
+            raise ValueError("research report not available; run train for this frozen experiment")
         return json.loads(path.read_text())
     if args.command == "status":
         from .logs import iter_log

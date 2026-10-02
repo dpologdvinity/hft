@@ -29,7 +29,8 @@ def test_quote_intake_keeps_latest_and_overflow_halts_without_rest():
     asyncio.run(exercise())
 
 
-def test_quiet_closed_market_does_not_abort_before_open(tmp_path, monkeypatch):
+@pytest.mark.parametrize("cancel", [False, True])
+def test_quiet_closed_market_does_not_abort_before_open(tmp_path, monkeypatch, cancel):
     import time
     from dataclasses import asdict
     from typing import ClassVar
@@ -78,10 +79,22 @@ def test_quiet_closed_market_does_not_abort_before_open(tmp_path, monkeypatch):
         yield {}
 
     config = RuntimeConfig("AAPL", "iex", 500, Costs(), RiskConfig(), SizingConfig())
-    result = asyncio.run(
-        run_stream(
-            Policy(), config, log_path=tmp_path / "run.jsonl", duration=0.1, stream=quiet_stream()
+
+    async def exercise():
+        task = asyncio.create_task(
+            run_stream(
+                Policy(),
+                config,
+                log_path=tmp_path / "run.jsonl",
+                duration=0.1,
+                stream=quiet_stream(),
+            )
         )
-    )
+        if cancel:
+            await asyncio.sleep(0.03)
+            task.cancel()
+        return await task
+
+    result = asyncio.run(exercise())
     assert result["run_completed"] and not result["complete"]
     assert result["position"] == "0"

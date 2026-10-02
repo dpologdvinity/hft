@@ -262,6 +262,12 @@ async def run_stream(
                 )
                 last_save = time.monotonic()
         clean = True
+    except asyncio.CancelledError:
+        # Operator stop: preserve completed sessions, but never certify a partial one.
+        clean = True
+        if engine.session:
+            engine.session_complete = False
+        engine.log.write("stopped", event_ns=time.time_ns(), reason="operator cancellation")
     except BaseException as exc:
         engine.session_complete = False
         engine.log.write(

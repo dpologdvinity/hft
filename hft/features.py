@@ -1,12 +1,14 @@
-"""A fixed causal state contract used unchanged by training and live inference."""
+"""Version 2 causal market, account and risk observation contract."""
 
 import math
 
 import numpy as np
 
-from .data import local_time
+from .account import decimal
 
 LOOKBACK = 60
+FEATURE_VERSION = 2
+TARGETS = (0, 1)
 FEATURE_NAMES = (
     "log_return_1",
     "log_return_5",
@@ -15,7 +17,6 @@ FEATURE_NAMES = (
     "body_ratio",
     "upper_wick_ratio",
     "lower_wick_ratio",
-    "prior_trend",
     "relative_spread",
     "quote_imbalance",
     "trailing_vwap_deviation",
@@ -23,24 +24,28 @@ FEATURE_NAMES = (
     "unrealized_fraction",
     "cash_fraction",
     "session_remaining",
+    "seconds_since_fill",
+    "remaining_order_slots",
+    "quote_freshness",
 )
-FEATURE_VERSION = 1
-TARGETS = (0, 1, -1)
 
 
-def observation(history, account) -> np.ndarray:
-    if len(history) < LOOKBACK + 1:
-        raise ValueError("need 61 completed bars for causal features")
+def observation(history, account, risk_state, session_window, *, now_ns=None, quote=None):
+    history = tuple(history)
+    if len(history) < 61:
+        raise ValueError("need 61 completed bars")
     b = history[-1]
+    if any(r.session_id != b.session_id for r in history[-61:]):
+        raise ValueError("history crosses sessions")
+    now = b.end_ns if now_ns is None else now_ns
     returns = [math.log(b.close / history[-1 - w].close) for w in (1, 5, 15, 60)]
     span = max(b.high - b.low, 1e-12)
     candles = [
         (b.close - b.open) / span,
-        (b.high - max(b.close, b.open)) / span,
+        (b.high - max(b.open, b.close)) / span,
         (min(b.close, b.open) - b.low) / span,
-        float(np.sign(returns[2])),
     ]
-    tail = list(history)[-60:]
+    tail = history[-60:]
     volume = sum(r.volume for r in tail)
     vwap = sum(r.close * r.volume for r in tail) / volume if volume else b.close
     depth = b.bid_size + b.ask_size
@@ -49,13 +54,29 @@ def observation(history, account) -> np.ndarray:
         (b.bid_size - b.ask_size) / depth if depth else 0,
         b.close / vwap - 1,
     ]
-    clock = local_time(b.timestamp)
-    elapsed = clock.hour * 3600 + clock.minute * 60 + clock.second - 9.5 * 3600
+    mid = decimal(quote.mid if quote is not None else b.mid)
+    equity = account.mark(mid)
+    if equity <= 0:
+        raise ValueError("nonpositive strategy equity")
+    remaining = (session_window.close_ns - now) / (session_window.close_ns - session_window.open_ns)
+    last = account.last_fill_ns
+    seconds = 1 if last is None else np.clip((now - last) / 60e9, 0, 1)
+    config = risk_state.config
+    order_count = sum(now - t < 60e9 for t in risk_state.order_times)
+    fresh = (
+        risk_state.freshness(quote, now)
+        if quote is not None
+        else b.tradable
+        and -250_000_000 <= now - b.quote_ns <= int(config.max_quote_age_seconds * 1e9)
+    )
     state = [
-        account.position,
-        account.unrealized(b.close) / account.initial_cash,
-        account.cash / account.initial_cash,
-        float(np.clip(1 - elapsed / 23_400, 0, 1)),
+        float(account.position * mid / equity),
+        float(account.unrealized(mid) / equity),
+        float(account.cash / equity),
+        np.clip(remaining, 0, 1),
+        seconds,
+        max(0, config.max_orders_per_minute - order_count) / config.max_orders_per_minute,
+        float(fresh),
     ]
     result = np.asarray(returns + candles + micro + state, dtype=np.float32)
     if not np.isfinite(result).all():

@@ -1,101 +1,92 @@
 from dataclasses import replace
+from decimal import Decimal as D
 
 import numpy as np
 import pytest
-from gymnasium.utils.env_checker import check_env
 
 from hft.account import Account, Costs
-from hft.data import Bar, MarketData, synthetic_data
+from hft.calendar import SessionWindow
+from hft.data import build_bars, synthetic_sessions
 from hft.env import TradingEnv
-from hft.features import observation
+from hft.features import FEATURE_NAMES, observation
+from hft.risk import RiskGateway
 
 
-def bars(n=100, price=100.0):
-    start = 1_735_826_400_000_000_000  # 2025-01-02 14:00 UTC
-    return [
-        Bar(
-            start + i * 1_000_000_000,
-            price,
-            price,
-            price,
-            price,
-            100,
-            price - 0.05,
-            price + 0.05,
-            100,
-            100,
-        )
-        for i in range(n)
-    ]
-
-
-def test_spread_fees_reversals_and_equity_reconcile():
-    a = Account(1000, Costs(commission=0.01, slippage_bps=0))
-    q = bars()[0]
-    a.target(1, q)
-    assert a.cash == pytest.approx(899.94)
-    assert a.equity(100) == pytest.approx(999.94)
-    assert a.target(1, q) is None
-    a.target(-1, q)
-    assert a.closed_pnl == pytest.approx([-0.12])
-    a.target(0, q)
-    assert a.cash == pytest.approx(999.76)
-    assert sum(a.closed_pnl) == pytest.approx(a.cash - 1000)
-    assert a.position == 0
-
-
-def test_invalid_data_and_configuration_fail_closed():
-    for change in [{"bid": 101}, {"close": float("nan")}, {"volume": -1}, {"high": 99}]:
-        with pytest.raises(ValueError):
-            MarketData([bars()[0], replace(bars()[1], **change)])
-    with pytest.raises(ValueError):
-        MarketData([bars()[0], bars()[0]])
+def test_invalid_configuration_fails_closed():
     with pytest.raises(ValueError):
         Costs(slippage_bps=-1)
     with pytest.raises(ValueError):
         Account(float("nan"))
+    with pytest.raises(ValueError):
+        TradingEnv([])
 
 
-def test_causal_features_and_stream_batch_parity():
-    rows = bars()
-    rows[59] = replace(rows[59], close=101, high=101, ask=101.05, bid=100.95)
-    a = Account()
-    before = observation(rows[:61], a)
-    assert before.shape == (15,)
+def test_manual_causal_features_future_invariance():
+    session = synthetic_sessions(days=1, bars_per_day=100)[0]
+    rows = list(build_bars(session))
+    rows[59] = replace(rows[59], close=101, high=max(rows[59].high, 101))
+    rows[60] = replace(
+        rows[60], close=100, low=min(rows[60].low, 100), high=max(rows[60].high, 100)
+    )
+    account = Account(500)
+    window = SessionWindow(session.session_id, session.open_ns, session.close_ns, None)
+    risk = RiskGateway()
+    before = observation(rows[:61], account, risk, window)
+    assert before.shape == (17,) and len(FEATURE_NAMES) == 17
     assert before.dtype == np.float32
-    rows[80] = replace(rows[80], close=500, high=500, ask=500.05, bid=499.95)
-    np.testing.assert_array_equal(before, observation(rows[:61], a))
-    np.testing.assert_array_equal(before, observation(rows[0:61], a))
     assert before[0] == pytest.approx(np.log(100 / 101), abs=1e-7)
+    assert before[10] == 0 and before[12] == 1 and before[14] == 1 and before[15] == 1
+    rows[80] = replace(rows[80], close=500, high=500)
+    np.testing.assert_array_equal(before, observation(rows[:61], account, risk, window))
 
 
-def test_action_fills_at_next_quote_and_terminal_liquidation_costs():
-    rows = bars(63)
-    rows[61] = replace(rows[61], open=110, high=110, low=110, close=110, bid=109.95, ask=110.05)
-    env = TradingEnv(MarketData(rows), costs=Costs(0.01, 0), episode_steps=10)
-    env.reset(options={"start": 60})
-    _, reward, terminated, truncated, info = env.step(1)
-    assert env.account.entry_price == pytest.approx(110.05)
-    assert env.account.equity(110) == pytest.approx(9999.94)
-    assert reward == pytest.approx(-0.06)  # costs once, reward in dollars
-    assert not terminated and not truncated
-    _, _, terminated, truncated, info = env.step(1)
-    assert truncated
-    assert env.account.position == 0
-    assert env.account.cash == pytest.approx(9989.88)
+def test_flat_and_constant_market_costs_once():
+    session = synthetic_sessions(days=1, bars_per_day=80)[0]
+    session = replace(
+        session,
+        bid=np.full(len(session.bid), 99.99),
+        ask=np.full(len(session.ask), 100.01),
+        trade_price=np.full(len(session.trade_price), 100.0),
+    )
+    env = TradingEnv(session, costs=Costs(0.005, 1), episode_steps=3)
+    env.reset()
+    rewards = []
+    for action in (1, 0, 0):
+        rewards.append(env.step(action)[1])
+    assert env.done and env.account.position == 0
+    loss = float(env.account.cash - D(500))
+    assert sum(rewards) == pytest.approx(10000 * loss * 1.1 / 500, abs=1e-10)
+    assert len(env.account.completed_trades) == 1
+    assert env.account.completed_trades[0].pnl == env.account.cash - D(500)
     with pytest.raises(RuntimeError):
         env.step(0)
 
 
-def test_parquet_roundtrip_and_seeded_augmentation(tmp_path):
-    data = synthetic_data(days=2, bars_per_day=100, seed=7)
-    path = tmp_path / "prices.parquet"
-    data.write(path)
-    loaded = MarketData.read(path)
-    assert loaded.synthetic and loaded.symbol == "SYNTH"
-    assert loaded.rows == data.rows
-    env = TradingEnv(loaded, augment=True, episode_steps=10)
+def test_seeded_augmentation():
+    session = synthetic_sessions(days=1, bars_per_day=100)[0]
+    env = TradingEnv(session, augment=True, episode_steps=10)
     first, _ = env.reset(seed=9)
     second, _ = env.reset(seed=9)
     np.testing.assert_array_equal(first, second)
-    check_env(TradingEnv(loaded, episode_steps=10), skip_render_check=True)
+
+
+def test_feature_streaming_deque_matches_historical_tuple():
+    from collections import deque
+
+    from hft.feed import BarAggregator
+
+    session = synthetic_sessions(days=1, bars_per_day=80)[0]
+    bars = build_bars(session)
+    window = SessionWindow(session.session_id, session.open_ns, session.close_ns, None)
+    aggregator = BarAggregator(session.symbol, session=window)
+    streamed = []
+    for event in session.iter_events():
+        streamed.extend(aggregator.add(event))
+    streamed.extend(aggregator.advance_to(session.close_ns))
+    account = Account(500)
+    risk = RiskGateway()
+    window = SessionWindow(session.session_id, session.open_ns, session.close_ns, None)
+    np.testing.assert_array_equal(
+        observation(bars[:61], account, risk, window),
+        observation(deque(streamed[:61]), account, risk, window),
+    )

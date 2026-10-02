@@ -1,110 +1,147 @@
-"""Next-row execution with explicit spread, commissions and terminal flattening."""
+"""Gym wrapper around the shared causal quote simulation."""
 
-import math
+from dataclasses import replace
+from typing import ClassVar
 
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from .account import Account, Costs
-from .data import MarketData, session_day
-from .data import augment as augment_data
-from .features import FEATURE_NAMES, LOOKBACK, TARGETS, observation
+from .account import Costs
+from .execution import Simulation
+from .features import FEATURE_NAMES, observation
 
 
 class TradingEnv(gym.Env):
-    metadata = {"render_modes": []}
+    metadata: ClassVar[dict] = {"render_modes": []}
 
     def __init__(
         self,
-        data: MarketData,
-        initial_cash=10_000.0,
+        data,
+        initial_cash=500,
         costs=None,
         episode_steps=512,
         random_start=False,
         augment=False,
-        drawdown_penalty=0.0,
-        downside_penalty=0.0,
+        latency_ms=75,
     ):
-        if len(data) < LOOKBACK + 2 or episode_steps < 1:
-            raise ValueError("insufficient data or invalid episode length")
-        if not all(math.isfinite(p) and p >= 0 for p in (drawdown_penalty, downside_penalty)):
-            raise ValueError("reward penalties must be nonnegative and finite")
-        self.source = data
-        self.initial_cash, self.costs = initial_cash, costs or Costs()
-        self.episode_steps, self.random_start, self.augment = episode_steps, random_start, augment
-        self.drawdown_penalty, self.downside_penalty = drawdown_penalty, downside_penalty
-        self.action_space = spaces.Discrete(3)
+        if episode_steps < 1:
+            raise ValueError("invalid episode length")
+        self.sessions = (data,) if hasattr(data, "quote_ns") else tuple(data)
+        if not self.sessions:
+            raise ValueError("no sessions")
+        self.initial_cash = initial_cash
+        self.costs = costs or Costs()
+        self.episode_steps = episode_steps
+        self.random_start = random_start
+        self.augment = augment
+        self.latency_ms = latency_ms
+        self.action_space = spaces.Discrete(2)
         bound = np.finfo(np.float32).max
         self.observation_space = spaces.Box(
             -bound, bound, shape=(len(FEATURE_NAMES),), dtype=np.float32
         )
         self.done = True
+        self._session_index = -1
+
+    @property
+    def account(self):
+        return self.simulation.account
+
+    @property
+    def history(self):
+        return self.simulation.history
+
+    @property
+    def session(self):
+        return self.simulation.session
+
+    @property
+    def index(self):
+        return self.simulation.index
+
+    @property
+    def remaining_steps(self):
+        return self.stop - self.index
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         options = options or {}
-        max_start = max(LOOKBACK, len(self.source) - self.episode_steps - 1)
+        if seed is not None:
+            self._session_index = -1
+        self._session_index = (
+            int(self.np_random.integers(len(self.sessions)))
+            if self.random_start
+            else (self._session_index + 1) % len(self.sessions)
+        )
+        data = self.sessions[self._session_index]
+        if self.augment:
+            # Causal independent volume jitter only, with raw prices and executable depth unchanged.
+            data = replace(
+                data,
+                trade_size=data.trade_size * self.np_random.uniform(0.8, 1.2, len(data.trade_size)),
+            )
+        self.simulation = Simulation(
+            data, self.initial_cash, self.costs, latency_ms=self.latency_ms
+        )
+        max_start = max(60, len(self.simulation.bars) - self.episode_steps - 1)
         start = int(
             options.get(
-                "start",
-                self.np_random.integers(LOOKBACK, max_start + 1) if self.random_start else LOOKBACK,
+                "start", self.np_random.integers(60, max_start + 1) if self.random_start else 60
             )
         )
-        if not LOOKBACK <= start < len(self.source) - 1:
-            raise ValueError("episode start has insufficient context or future rows")
-        stop = min(start + self.episode_steps, len(self.source) - 1)
-        if self.augment:
-            self.data = augment_data(self.source.subset(start - LOOKBACK, stop + 1), self.np_random)
-            self.index, self.stop = LOOKBACK, len(self.data) - 1
-        else:
-            self.data, self.index, self.stop = self.source, start, stop
-        self.account = Account(self.initial_cash, self.costs)
-        self.peak, self.last_drawdown, self.done = self.initial_cash, 0.0, False
+        self.simulation.reset(start)
+        self.stop = min(start + self.episode_steps, len(self.simulation.bars) - 1)
+        if self.stop <= start:
+            raise ValueError("insufficient future bars")
+        self.done = False
+        self.peak = float(self.account.initial_cash)
+        self.last_drawdown = 0.0
         return self._observation(), self._info()
 
     def _observation(self):
-        return observation(
-            self.data.rows[max(0, self.index - LOOKBACK) : self.index + 1], self.account
-        )
+        s = self.simulation
+        return observation(s.history, s.account, s.risk, s.session, now_ns=s.now_ns, quote=s.quote)
 
     def _info(self):
-        row = self.data.rows[self.index]
+        s = self.simulation
+        e = s.execution
         return {
-            "equity": self.account.equity(row.close),
-            "position": self.account.position,
-            "timestamp": row.timestamp,
-            "fills": len(self.account.fills),
+            "equity": float(s.snapshot().equity),
+            "position": float(s.account.position),
+            "timestamp": s.now_ns,
+            "session_id": s.session.session_id,
+            "fills": len(s.account.fills),
+            "rejects": e.rejects,
+            "unfilled": e.unfilled,
+            "latencies": list(e.latencies),
+            "incomplete": bool(self.done and (s.account.position or e.pending)),
         }
 
     def step(self, action):
         if self.done:
-            raise RuntimeError("reset before stepping a completed episode")
+            raise RuntimeError("reset before stepping")
         if not self.action_space.contains(action):
             raise ValueError("invalid action")
-        current, following = self.data.rows[self.index : self.index + 2]
-        before = self.account.equity(current.close)
-        if session_day(current.timestamp) != session_day(following.timestamp):
-            self.account.target(0, current)
-        else:
-            self.account.target(TARGETS[int(action)], following)
-        self.index += 1
-        terminated = self.account.equity(following.close) <= 0
-        truncated = self.index >= self.stop
-        # Flatten before crossing a session boundary, including the last available row.
-        end_session = self.index == len(self.data) - 1 or session_day(
-            following.timestamp
-        ) != session_day(self.data.rows[self.index + 1].timestamp)
-        if terminated or truncated or end_session:
-            self.account.target(0, following)
-        equity = self.account.equity(following.close)
-        pnl = equity - before
+        s = self.simulation
+        before = float(s.snapshot().equity)
+        # On the final interval an exit has actual future quotes available, not a fictional terminal fill.
+        final = s.index + 1 >= self.stop
+        s.submit_action(0 if final else int(action))
+        next_ns = s.bars[s.index + 1].end_ns
+        s.advance_to(next_ns)
+        equity = float(s.snapshot().equity)
         self.peak = max(self.peak, equity)
         drawdown = self.peak - equity
         reward = (
-            pnl
-            - self.drawdown_penalty * max(0, drawdown - self.last_drawdown)
-            - self.downside_penalty * min(pnl, 0) ** 2
+            10000
+            * ((equity - before) - 0.1 * max(0, drawdown - self.last_drawdown))
+            / float(s.account.initial_cash)
         )
-        self.last_drawdown, self.done = drawdown, terminated or truncated
+        self.last_drawdown = drawdown
+        terminated = equity <= 0
+        truncated = s.index >= self.stop
+        self.done = terminated or truncated
+        if self.done:
+            s.execution.cancel()
         return self._observation(), float(reward), bool(terminated), bool(truncated), self._info()

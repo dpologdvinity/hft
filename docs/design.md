@@ -1,4 +1,6 @@
-# Trading research and paper execution
+# Trading research and paper execution (superseded)
+
+See `trading-spec.md` for the user's clarified requirements and current design.
 
 The user's clarified request is the engineering brief; `PROMPT.md` is background. Build an end-to-end,
 single-symbol US-equity research system, with discrete flat/long/short

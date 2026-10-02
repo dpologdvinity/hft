@@ -222,6 +222,7 @@ class Simulation:
                 value = metadata[name][index]
                 event[name] = value.as_py() if hasattr(value, "as_py") else value
         event.update(
+            S=d.symbol,
             event_ns=int(d.quote_ns[index]),
             bp=decimal(d.bid[index]),
             ap=decimal(d.ask[index]),

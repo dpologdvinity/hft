@@ -43,8 +43,14 @@ def _parser():
     train = commands.add_parser("train")
     train.add_argument("--experiment", type=Path, required=True)
     train.add_argument("--resume", action="store_true")
+    quality = commands.add_parser(
+        "data-quality", help="check development coverage without training or test evaluation"
+    )
+    quality.add_argument("--experiment", type=Path, required=True)
     report = commands.add_parser("report")
     report.add_argument("--experiment", type=Path, required=True)
+    dashboard = commands.add_parser("dashboard", help="local read-only research dashboard")
+    dashboard.add_argument("--port", type=int, default=8765)
     for name in ("replay", "dry-run", "broker-paper", "live"):
         command = commands.add_parser(name)
         command.add_argument("--model", type=Path)
@@ -81,6 +87,12 @@ def _read_credentials():
 
 
 def _handle(args):
+    if args.command == "dashboard":
+        from .dashboard import serve
+
+        if not 0 < args.port <= 65535:
+            raise ValueError("dashboard port must be between 1 and 65535")
+        return serve(Path(__file__).resolve().parents[1], args.port)
     if args.command == "live":
         if not args.enable_live:
             raise ValueError("live requires explicit --enable-live and validated paper evidence")
@@ -147,6 +159,10 @@ def _handle(args):
         from .training import run_search
 
         return run_search(args.experiment, resume=args.resume)
+    if args.command == "data-quality":
+        from .research import preflight_experiment
+
+        return preflight_experiment(args.experiment)
     if args.command == "report":
         path = (
             args.experiment

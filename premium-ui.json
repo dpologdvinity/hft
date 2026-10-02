@@ -1,0 +1,17 @@
+{
+  "profile": "product-admin",
+  "sourceRoots": ["frontend/src"],
+  "locale": "en-US",
+  "canonicalMap": "DESIGN.md",
+  "requiredCapabilities": ["Scrollbar"],
+  "requiredCommands": ["format", "unit", "build"],
+  "commands": {
+    "format": "npm --prefix frontend run format:check",
+    "unit": "npm --prefix frontend test",
+    "build": "npm --prefix frontend run build"
+  },
+  "evidence": {
+    "tokenDrift": "frontend/tests/design.test.js",
+    "failurePaths": "frontend/src/useDashboard.js"
+  }
+}

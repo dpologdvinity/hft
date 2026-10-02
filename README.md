@@ -29,6 +29,25 @@ Python 3.12 or later is required. Training defaults to two CPU threads and four
 in-process environments, with a two-hour cumulative search budget and an 8GB
 process memory ceiling. Data has separate resident and transient memory guards.
 
+## Local dashboard
+
+```bash
+npm --prefix frontend ci
+npm --prefix frontend run build
+python -m hft dashboard
+```
+
+Open **http://127.0.0.1:8765**. Overview, Research and Paper trading show local
+dataset history, recorded training outcomes, data-quality diagnostics and verified
+paper journals. Refresh runs automatically every 30 seconds. Failed reads retain
+the last snapshot and label it stale. The dashboard binds to your computer only,
+keeps credentials on the server, and has no order or activation controls.
+
+Market history displays the last reported trade from each development session;
+it is not a strategy profit chart. Reserved final-test prices are never read by
+the dashboard. Empty results stay empty until actual evidence exists. See
+[frontend setup](frontend/README.md) for development commands.
+
 ## Get free stock data
 
 Create an Alpaca paper account yourself and provide market-data credentials in
@@ -66,6 +85,7 @@ handle holidays, DST and early closes.
 
 ```bash
 python -m hft experiment --dataset data/aapl/manifest.json --config config/research.toml --output artifacts/aapl/experiment.json
+python -m hft data-quality --experiment artifacts/aapl/experiment.json
 python -m hft train --experiment artifacts/aapl/experiment.json
 python -m hft train --experiment artifacts/aapl/experiment.json --resume
 python -m hft report --experiment artifacts/aapl/experiment.json
@@ -80,6 +100,22 @@ another output filename does not silently allow retuning on the same dates.
 After a failed final test, obtain later unseen sessions for another final test.
 Interrupted final evaluation may require fresh test dates; it fails conservatively.
 
+The development-only data-quality check uses the shared simulation to count
+warmup coverage and gaps. Training runs this check automatically before fitting.
+Any event gap over the runtime's five-second limit blocks the experiment; fewer
+than 61 completed bars or unverified data provenance also fail. The check stops
+at the first unusable session and records the number checked in `diagnostics.json`.
+It does not evaluate the final test. Setup, preflight and fitting all count toward
+the cumulative training time budget. Resuming a completed final report preserves it.
+
+The current local MCD dataset has 82 real IEX sessions, with 52 development and
+30 reserved final-test sessions. Its feature-v3 experiment is
+`artifacts/mcd-v3/experiment.json`. The first development session fails coverage:
+936 event gaps, 42 eligible warmup decisions and 4,577 ineligible decisions.
+Training is blocked before fitting, and profitability remains unproven. Use data
+with sufficient continuity for these execution rules; extra training cannot fix
+missing market coverage.
+
 Reports include cash, risk-matched intraday long, EMA 5/20, twenty random controls,
 transaction costs, completed flat-to-flat trades, quote-level drawdown, stress
 execution and a corrected paired block bootstrap. A separate full-stock return
@@ -90,6 +126,9 @@ execution frequency prevents eligibility. Too little history is an explicit
 The resulting `artifacts/aapl/search/bundle/` contains `model.onnx` and a hashed
 manifest with the feature, execution, dataset and research contracts. Old single
 ONNX files and the previous three-action schema are rejected.
+Feature-v2 bundles and older frozen experiments are also incompatible with the
+current feature-v3 and causal boundary-timer contract. Freeze a new experiment
+and retrain; do not relabel an old model or delete final-test reservations.
 
 ## Replay and dry runs
 
@@ -114,6 +153,14 @@ backlogs and unresolved orders prevent entries. A stop without a subsequent
 executable local quote records remaining inventory; it cannot fabricate a fill.
 Local account and risk state survives restart. Simulated outstanding orders are
 cancelled on restart; broker orders are reconciled.
+
+Replay publishes bars at causal five-second timer boundaries. Training and
+runtime keep the same bounded 61-bar history and reset warmup on feed gaps.
+Truncated training episodes use genuine subsequent quotes for bounded liquidation;
+unresolved positions block reset rather than disappearing. Incomplete normal,
+stress or primary-control rollouts cannot qualify. Historical data without arrival
+timestamps still cannot establish actual network latency, and boundary-timer
+replay idealizes the streaming loop's polling delay.
 
 ## Broker paper trading and graduation
 

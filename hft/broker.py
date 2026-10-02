@@ -168,7 +168,7 @@ class AlpacaBroker:
             if (
                 not asset.get("tradable")
                 or not asset.get("fractionable")
-                or asset.get("asset_class", "us_equity") != "us_equity"
+                or asset.get("class", asset.get("asset_class")) != "us_equity"
             ):
                 raise ValueError("stock must be tradable and fractionable")
             state = self.store.load()

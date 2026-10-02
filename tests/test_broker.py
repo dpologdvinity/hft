@@ -34,7 +34,7 @@ class Exchange:
         if path == "/v2/clock":
             return {"is_open": True}
         if path == "/v2/assets/AAPL":
-            return {"tradable": True, "fractionable": True, "asset_class": "us_equity"}
+            return {"tradable": True, "fractionable": True, "class": "us_equity"}
         if path == "/v2/positions":
             return [{"symbol": "AAPL", "qty": str(self.qty)}] if self.qty else []
         if path.startswith("/v2/orders?"):
@@ -224,3 +224,22 @@ def test_unknown_post_remains_durable_and_blocks_second_submission(tmp_path):
     with pytest.raises(RuntimeError, match="lookup unavailable"):
         setup(tmp_path, exchange)
     assert exchange.posts == 1
+
+
+@pytest.mark.parametrize("asset_class", ["crypto", None])
+def test_asset_class_must_explicitly_be_stock(tmp_path, asset_class):
+    exchange = Exchange()
+    original = exchange.request
+
+    def request(method, path, body=None):
+        if path == "/v2/assets/AAPL":
+            asset = {"tradable": True, "fractionable": True}
+            if asset_class is not None:
+                asset["class"] = asset_class
+            return asset
+        return original(method, path, body)
+
+    exchange.request = request
+    with pytest.raises(ValueError, match="stock"):
+        setup(tmp_path, exchange)
+    assert exchange.posts == 0

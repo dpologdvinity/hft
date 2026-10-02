@@ -74,3 +74,111 @@ def test_freeze_before_search_and_insufficient_history(tmp_path, monkeypatch):
         freeze_experiment(source, {}, tmp_path / "experiment.json")
     monkeypatch.setattr("hft.data.load_dataset", lambda path: sessions[:60])
     assert freeze_experiment(source, {}, tmp_path / "small.json")["status"] == "insufficient-data"
+
+
+def test_freeze_loaded_real_parquet_metadata(tmp_path, monkeypatch):
+    from hft.history import download_sessions
+    from hft.research import freeze_experiment
+
+    class RecordedTransport:
+        def get(self, url, params):
+            if url.endswith("/calendar"):
+                return [{"date": "2025-01-02", "open": "09:30", "close": "16:00"}]
+            kind = "quotes" if url.endswith("/quotes") else "trades"
+            quote = {
+                "t": "2025-01-02T14:30:00.123456789Z",
+                "bp": 99.99,
+                "ap": 100.01,
+                "bs": 1,
+                "as": 2,
+                "c": ["R"],
+            }
+            trade = {
+                "t": "2025-01-02T14:30:00.123456789Z",
+                "p": 100.0,
+                "s": 1,
+                "i": 1,
+                "c": ["@"],
+                "z": "C",
+            }
+            return {kind: [quote if kind == "quotes" else trade], "next_page_token": None}
+
+    monkeypatch.setattr("hft.history._check_disk", lambda *args: None)
+    manifest = download_sessions(
+        "X", "2025-01-02", "2025-01-02", tmp_path / "data", client=RecordedTransport()
+    )
+    result = freeze_experiment(manifest, {}, tmp_path / "experiment.json")
+    assert result["status"] == "insufficient-data"
+    assert result["real_executable_data"] and result["session_hashes"]["2025-01-02"]
+
+
+def test_rollout_carries_peak_risk_and_permanent_halt_between_sessions(monkeypatch):
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from hft.research import _rollout
+    from hft.risk import RiskGateway
+
+    created = []
+
+    class Env:
+        def __init__(self, session, initial_cash, **kwargs):
+            self.session = session
+            self.initial_cash = initial_cash
+            self.account = SimpleNamespace(
+                initial_cash=Decimal(str(initial_cash)), completed_trades=(), fills=[]
+            )
+            self.risk = RiskGateway()
+            self.simulation = SimpleNamespace(
+                risk=self.risk,
+                snapshot=self.snapshot,
+                now_ns=session.open_ns,
+                equity_curve=[initial_cash],
+            )
+            created.append(self)
+
+        def snapshot(self):
+            return SimpleNamespace(
+                session=self.session,
+                equity=Decimal(str(self.initial_cash)),
+                initial_equity=self.account.initial_cash,
+                history=(),
+                quote=None,
+                position=Decimal(0),
+            )
+
+        def reset(self):
+            self.risk.observe(self.snapshot(), self.session.open_ns)
+            return np.zeros(17, dtype=np.float32), {}
+
+        def step(self, action):
+            self.initial_cash -= 3
+            self.simulation.equity_curve.extend([self.initial_cash - 17, self.initial_cash])
+            self.risk.observe(self.snapshot(), self.session.open_ns + 1)
+            return (
+                np.zeros(17, dtype=np.float32),
+                0.0,
+                True,
+                False,
+                {"equity": self.initial_cash, "incomplete": False},
+            )
+
+        def _observation(self):
+            return np.zeros(17, dtype=np.float32)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("hft.env.TradingEnv", Env)
+    sessions = [
+        SimpleNamespace(
+            session_id=str(i), open_ns=(i + 1) * 10**12, close_ns=(i + 1) * 10**12 + 1000 * 10**9
+        )
+        for i in range(2)
+    ]
+    result, _ = _rollout(sessions, lambda obs, env: 0, initial_cash=100)
+    assert result["max_drawdown"] == pytest.approx(0.23)
+    assert created[-1].risk.peak == Decimal(100)
+    assert created[-1].risk.permanent_halt

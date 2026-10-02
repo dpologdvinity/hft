@@ -75,6 +75,8 @@ def freeze_experiment(dataset_manifest, config, output):
     source = Path(dataset_manifest).resolve()
     sessions = load_dataset(source)
     config = validate_config(config)
+    if len({s.symbol for s in sessions}) > 1:
+        raise ValueError("research requires a single stock symbol")
     ids = [s.session_id for s in sessions]
     result = {
         "dataset_manifest": str(source),
@@ -92,7 +94,16 @@ def freeze_experiment(dataset_manifest, config, output):
             and s.manifest.get("provenance") in ("alpaca-historical-iex", "alpaca-realtime-iex")
             for s in sessions
         ),
-        "session_hashes": {s.session_id: canonical_hash(s.manifest) for s in sessions},
+        "session_hashes": {
+            s.session_id: canonical_hash(
+                {
+                    k: v
+                    for k, v in s.manifest.items()
+                    if k not in ("quote_metadata", "trade_metadata")
+                }
+            )
+            for s in sessions
+        },
     }
     try:
         dev, test = temporal_split(ids)
@@ -140,12 +151,21 @@ def _rollout(sessions, policy, costs=None, initial_cash=500, latency_ms=75, dead
     latencies = []
     session_fills = []
     incomplete = False
+    previous_risk = None
     for session in sessions:
         env = TradingEnv(
             session, initial_cash=daily[-1], costs=costs, episode_steps=10**9, latency_ms=latency_ms
         )
         obs, _ = env.reset()
+        if previous_risk is not None:
+            env.simulation.risk.load_state(previous_risk)
+            env.simulation.risk._atr_bar = None
+            env.simulation.risk.observe(env.simulation.snapshot(), env.simulation.now_ns)
+            env.peak = float(env.simulation.risk.peak)
+            env.last_drawdown = max(0.0, env.peak - daily[-1])
+            obs = env._observation()
         done = False
+        quote_marks_seen = 0
         while not done:
             if time.monotonic() >= deadline:
                 env.close()
@@ -153,8 +173,12 @@ def _rollout(sessions, policy, costs=None, initial_cash=500, latency_ms=75, dead
             observations.append(obs.copy())
             action = int(policy(obs, env))
             obs, _, terminated, truncated, info = env.step(action)
+            quote_marks = getattr(env.simulation, "equity_curve", [])
+            curve.extend(quote_marks[quote_marks_seen:])
+            quote_marks_seen = len(quote_marks)
             curve.append(float(info["equity"]))
             done = terminated or truncated
+        previous_risk = env.simulation.risk.state_dict()
         daily.append(float(info["equity"]))
         pnl.extend(float(t.pnl) for t in env.account.completed_trades)
         fills += len(env.account.fills)
@@ -264,6 +288,10 @@ def evaluate(
     result = {
         "policy": agent,
         "cash": cash,
+        "stock_return_context": {
+            "return": float(sessions[-1].trade_price[-1] / sessions[0].trade_price[0] - 1),
+            "risk_matched": False,
+        },
         **controls,
         "edge": {
             n: paired_bootstrap(agent["daily_returns"], r["daily_returns"], seed)

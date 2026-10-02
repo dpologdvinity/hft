@@ -147,3 +147,28 @@ def test_interrupted_trials_resume_and_test_is_consumed_once(tmp_path, monkeypat
     checkpoint.write_bytes(b"tampered")
     with pytest.raises(ValueError, match="identity"):
         training._search(sessions, experiment, tmp_path, resume=True, smoke=True)
+
+
+def test_consumed_test_registry_rejects_new_output_or_changed_partitions(tmp_path, monkeypatch):
+    from hft import training
+
+    monkeypatch.setattr(training, "TEST_REGISTRY", tmp_path / "registry.json")
+    experiment = {
+        "symbol": "SPY",
+        "feed": "iex",
+        "synthetic": False,
+        "final_test": ["2025-01-02"],
+        "dataset_hash": "first",
+        "session_hashes": {"2025-01-02": "partitionA"},
+        "experiment_hash": "experimentA",
+    }
+    training.reserve_final_test(experiment)
+    second = experiment | {
+        "dataset_hash": "newcopy",
+        "session_hashes": {"2025-01-02": "corrected"},
+        "experiment_hash": "experimentB",
+    }
+    with pytest.raises(ValueError, match="consumed"):
+        training.reserve_final_test(second)
+    training.reserve_final_test(second | {"final_test": ["2025-01-03"]})
+    training.reserve_final_test(experiment | {"synthetic": True})

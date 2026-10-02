@@ -26,6 +26,7 @@ def metrics(daily_equity, trade_pnl, equity_curve=None, cash_flows=None):
         "max_drawdown": float(np.max((peak - curve) / peak)),
         "expectancy": float(pnl.mean()) if len(pnl) else 0.0,
         "profit_factor": profit / loss if loss else ("infinite" if profit else None),
+        "profit_factor_infinite": bool(profit > 0 and loss == 0),
         "gross_profit": profit,
         "gross_loss": loss,
         "trades": len(pnl),

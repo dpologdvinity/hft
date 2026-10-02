@@ -1,5 +1,6 @@
 """Bounded, resumable offline PPO search; runtime never imports this module."""
 
+import fcntl
 import hashlib
 import json
 import math
@@ -12,6 +13,8 @@ import numpy as np
 
 from .research import CANDIDATES, atomic_json, canonical_hash, eligibility, evaluate
 
+TEST_REGISTRY = Path(__file__).resolve().parents[1] / ".state" / "research-final-tests.json"
+
 DEFAULTS = {
     "timesteps": 100000,
     "seeds": [42, 43],
@@ -19,6 +22,34 @@ DEFAULTS = {
     "wall_seconds": 7200,
     "initial_cash": 500.0,
 }
+
+
+def reserve_final_test(experiment):
+    """Consume real test identities under one project-wide serialized registry."""
+    if experiment.get("synthetic"):
+        return
+    TEST_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+    keys = [
+        canonical_hash(
+            {"symbol": experiment["symbol"], "feed": experiment["feed"], "session_id": sid}
+        )
+        for sid in experiment["final_test"]
+    ]
+    with TEST_REGISTRY.with_suffix(".lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        registry = json.loads(TEST_REGISTRY.read_text()) if TEST_REGISTRY.exists() else {}
+        if any(key in registry for key in keys):
+            raise ValueError("final test sessions already consumed; reserve later unseen dates")
+        for key, sid in zip(keys, experiment["final_test"], strict=True):
+            registry[key] = {
+                "symbol": experiment["symbol"],
+                "feed": experiment["feed"],
+                "session_id": sid,
+                "session_hash": experiment.get("session_hashes", {}).get(sid),
+                "dataset_hash": experiment.get("dataset_hash"),
+                "experiment_hash": experiment["experiment_hash"],
+            }
+        atomic_json(TEST_REGISTRY, registry)
 
 
 def validate_config(config):
@@ -47,6 +78,8 @@ def validate_config(config):
         or any(type(s) is not int for s in result["seeds"])
     ):
         raise ValueError("invalid seeds")
+    if len(set(result["seeds"])) != len(result["seeds"]):
+        raise ValueError("seeds must be independent unique values")
     return result
 
 
@@ -163,6 +196,8 @@ def fit_candidate(training_sessions, settings, seed, budget):
 def _save_checkpoint(model, path):
     temporary = path.with_name(path.stem + ".tmp.zip")
     model.save(str(temporary))
+    with temporary.open("rb") as file:
+        os.fsync(file.fileno())
     os.replace(temporary, path)
 
 
@@ -261,6 +296,8 @@ def _search_impl(sessions, experiment, output, resume=False, smoke=False):
             [t["controls"][n] for t in trials if t["candidate"] == candidate and t["seed"] == seed]
         ),
     )
+    if not smoke:
+        reserve_final_test(experiment)
     experiment["final_test_consumed"] = True
     if experiment.get("path"):
         atomic_json(

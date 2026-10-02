@@ -1,0 +1,5 @@
+# Frozen fields must match the bundle. The CLI separately requires explicit
+# --enable-live --capital 500 --max-live-notional 10 and recomputed evidence.
+capital = 500.0
+bar_seconds = 5
+latency_ms = 75

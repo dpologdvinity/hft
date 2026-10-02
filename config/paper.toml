@@ -1,0 +1,4 @@
+# Optional subset of the immutable bundle contract; use matching capital at training.
+capital = 500.0
+bar_seconds = 5
+latency_ms = 75

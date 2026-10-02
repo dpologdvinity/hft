@@ -1,9 +1,12 @@
 """Operator CLI. Import training and mutable broker code only in explicit commands."""
 
 import argparse
+import asyncio
 import json
 import os
 import sys
+import time
+import tomllib
 from pathlib import Path
 
 
@@ -70,6 +73,9 @@ def _parser():
 def _read_credentials():
     key = os.environ.get("ALPACA_API_KEY") or os.environ.get("ALPACA_PAPER_API_KEY")
     secret = os.environ.get("ALPACA_SECRET_KEY") or os.environ.get("ALPACA_PAPER_SECRET_KEY")
+    if key and secret:
+        os.environ.setdefault("ALPACA_API_KEY", key)
+        os.environ.setdefault("ALPACA_SECRET_KEY", secret)
     if not key or not secret:
         raise ValueError("set ALPACA_API_KEY and ALPACA_SECRET_KEY for free read-only market data")
 
@@ -78,6 +84,8 @@ def _handle(args):
     if args.command == "live":
         if not args.enable_live:
             raise ValueError("live requires explicit --enable-live and validated paper evidence")
+        if args.capital is None:
+            raise ValueError("live requires explicit --capital matching the evaluated allocation")
         if args.max_live_notional is None or not 0 < args.max_live_notional <= 10:
             raise ValueError("live requires --max-live-notional in (0,10] for the canary")
     if args.command == "data-probe":
@@ -90,8 +98,161 @@ def _handle(args):
         from .history import download_sessions
 
         return {"dataset": str(download_sessions(args.symbol, args.start, args.end, args.output))}
-    # Handlers are added with their verified implementation in later plan tasks.
-    raise ValueError(f"{args.command} is not implemented yet")
+    if args.command == "smoke":
+        from .data import save_dataset, synthetic_sessions
+        from .paper import PaperEngine, replay_sessions
+        from .policy import OnnxPolicy
+        from .training import train
+
+        if args.output.exists():
+            raise ValueError("smoke output already exists; choose a fresh directory")
+        sessions = synthetic_sessions(days=4, bars_per_day=100)
+        save_dataset(sessions, args.output / "dataset")
+        result = train(sessions, args.output / "search", timesteps=args.timesteps, smoke=True)
+        policy = OnnxPolicy(args.output / "search" / "bundle")
+        replay = replay_sessions(
+            PaperEngine(
+                policy,
+                log_path=args.output / "replay.jsonl",
+                symbol=policy.metadata["symbol"],
+                synthetic=True,
+                metadata=policy.metadata,
+            ),
+            sessions,
+        )
+        return {
+            "status": result["status"],
+            "paper_eligible": False,
+            "bundle": str(args.output / "search" / "bundle"),
+            "replay": replay,
+        }
+    if args.command == "prepare":
+        from .recording import prepare_recordings
+
+        if not args.input:
+            raise ValueError("prepare requires --input recording directory or manifest")
+        return prepare_recordings(args.input)
+    if args.command == "record":
+        _read_credentials()
+        from .recording import record
+
+        return asyncio.run(record(args.symbol, args.output, args.duration))
+    if args.command == "experiment":
+        from .research import freeze_experiment
+
+        if not args.dataset:
+            raise ValueError("experiment requires --dataset manifest")
+        return freeze_experiment(args.dataset, tomllib.loads(args.config.read_text()), args.output)
+    if args.command == "train":
+        from .training import run_search
+
+        return run_search(args.experiment, resume=args.resume)
+    if args.command == "report":
+        path = (
+            args.experiment
+            if args.experiment.name == "research.json"
+            else args.experiment.parent / "search" / "research.json"
+        )
+        return json.loads(path.read_text())
+    if args.command == "status":
+        from .logs import iter_log
+
+        journals = []
+        for path in sorted(args.logs.rglob("*.jsonl")):
+            try:
+                first = last = None
+                for row in iter_log(path):
+                    first = first or row
+                    last = row
+                journals.append({"path": str(path), "source": first.get("source"), "last": last})
+            except (ValueError, OSError) as error:
+                journals.append({"path": str(path), "error": str(error)})
+        return {"journals": journals, "state_files": [str(p) for p in args.state.glob("*.json")]}
+    if args.command == "graduate":
+        from .data import atomic_json
+        from .evidence import graduate
+
+        result = graduate(args.model, args.logs, calendar_path=args.calendar)
+        if args.output:
+            atomic_json(args.output, result)
+        return result
+    if args.command in ("replay", "dry-run", "broker-paper", "live"):
+        if not args.model:
+            raise ValueError("--model immutable bundle directory is required")
+        from .configuration import runtime_config
+        from .policy import OnnxPolicy
+
+        policy = OnnxPolicy(args.model)
+        config = runtime_config(
+            policy.metadata,
+            args.config,
+            args.capital,
+            args.max_live_notional if args.command == "live" else None,
+        )
+        output = args.output or Path("logs") / args.command / f"run-{time.time_ns()}.jsonl"
+        if args.command == "replay":
+            from .data import load_dataset
+            from .paper import PaperEngine, replay_sessions
+            from .risk import RiskGateway
+
+            sessions = load_dataset(args.dataset)
+            if any(
+                s.symbol != config.symbol or s.manifest.get("feed") != config.feed for s in sessions
+            ):
+                raise ValueError("dataset/model market contract mismatch")
+            return replay_sessions(
+                PaperEngine(
+                    policy,
+                    log_path=output,
+                    initial_cash=config.capital,
+                    costs=config.costs,
+                    risk=RiskGateway(config.risk),
+                    latency_ms=config.latency_ms,
+                    bar_seconds=config.bar_seconds,
+                    sizing=config.sizing,
+                    symbol=config.symbol,
+                    synthetic=any(s.synthetic for s in sessions),
+                    metadata=policy.metadata,
+                ),
+                sessions,
+            )
+        if policy.metadata.get("synthetic_training") or config.feed != "iex":
+            raise ValueError("streaming trading requires a model trained on real IEX data")
+        _read_credentials()
+        broker = None
+        if args.command in ("broker-paper", "live"):
+            from .broker import AlpacaBroker, AlpacaClient
+            from .risk import RiskGateway
+
+            broker = AlpacaBroker(
+                AlpacaClient(args.command),
+                config.symbol,
+                RiskGateway(config.risk),
+                config.costs,
+                initial_cash=config.capital,
+                enable_live=args.command == "live",
+                model_path=args.model,
+                logs_path=args.logs if args.command == "live" else None,
+                max_live_notional=args.max_live_notional if args.command == "live" else None,
+                contract_hash=policy.manifest["contract_hash"] + ":" + config.execution_hash,
+            )
+        from .runtime import run_stream
+
+        try:
+            return asyncio.run(
+                run_stream(
+                    policy,
+                    config,
+                    mode=args.command,
+                    log_path=output,
+                    duration=args.duration,
+                    broker=broker,
+                )
+            )
+        finally:
+            if broker:
+                broker.close()
+    raise ValueError("unknown command")
 
 
 def main(argv=None):
@@ -101,6 +262,6 @@ def main(argv=None):
         if result is not None:
             print(json.dumps(result, indent=2, allow_nan=False, default=str))
         return 0
-    except (ValueError, RuntimeError, OSError, ImportError) as error:
+    except (ValueError, RuntimeError, OSError, ImportError, KeyError, TypeError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

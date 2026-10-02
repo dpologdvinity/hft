@@ -1,9 +1,16 @@
+import os
 import subprocess
 import sys
 
 
 def command(*args):
-    return subprocess.run([sys.executable, "-m", "hft", *args], capture_output=True, text=True)
+    return subprocess.run(
+        [sys.executable, "-m", "hft", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={k: v for k, v in os.environ.items() if not k.startswith("ALPACA_")},
+    )
 
 
 def test_help_lists_the_operator_commands():

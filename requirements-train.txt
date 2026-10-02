@@ -1,0 +1,7 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+-r requirements-runtime.txt
+stable-baselines3==2.9.0
+torch==2.14.1+cpu
+onnx==1.23.1
+pytest==9.1.1
+ruff==0.16.10

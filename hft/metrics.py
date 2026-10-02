@@ -67,3 +67,28 @@ def paired_bootstrap(agent, baseline, seed=42):
         "positive": bool(low > 0),
         "block_length": length,
     }
+
+
+class EquitySummary:
+    """Constant-memory intraday extrema, composable across ordered sessions."""
+
+    def __init__(self, initial):
+        self.minimum = self.maximum = self.peak = float(initial)
+        self.drawdown = 0.0
+        self.marks = 0
+        self.add(initial)
+
+    def add(self, value):
+        value = float(value)
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError("invalid intraday equity")
+        self.minimum = min(self.minimum, value)
+        self.maximum = self.peak = max(self.peak, value)
+        self.drawdown = max(self.drawdown, (self.peak - value) / self.peak)
+        self.marks += 1
+
+    def combine(self, later):
+        self.drawdown = max(self.drawdown, later.drawdown, (self.peak - later.minimum) / self.peak)
+        self.minimum = min(self.minimum, later.minimum)
+        self.maximum = self.peak = max(self.peak, later.maximum)
+        self.marks += later.marks

@@ -1,82 +1,19 @@
-"""Delayed local fills, causal policy decisions and durable execution event logs."""
+"""One causal streaming engine for replay, dry runs and broker decisions."""
 
-import json
 import time
-import uuid
 from collections import deque
-from dataclasses import asdict, dataclass
-from pathlib import Path
+from dataclasses import asdict
 
 from .account import Account, Costs
-from .data import NS, session_day
-from .features import LOOKBACK, TARGETS, observation
-from .risk import RiskGateway
+from .execution import LocalExecution
+from .features import LOOKBACK, observation
+from .feed import BarAggregator, quote_from_event
+from .logs import EventLog
+from .risk import RiskGateway, Snapshot
+from .sizing import SizingConfig, make_intent
 
-
-@dataclass(frozen=True)
-class Pending:
-    target: int
-    due: int
-    signal_mid: float
-
-
-class PaperBroker:
-    def __init__(self, account, risk, latency_ms=75):
-        if not 0 < latency_ms <= 10_000:
-            raise ValueError("paper latency must be positive and <= 10 seconds")
-        self.account, self.risk = account, risk
-        self.latency_ns = int(latency_ms * 1_000_000)
-        self.pending, self.last_rejection = None, None
-        self.last_signal_mid = None
-
-    def submit(self, target, quote, now, *, history=()):
-        if self.pending is not None or target == self.account.position:
-            return None
-        reason = self.risk.check(target, quote, self.account, now, history=history)
-        self.last_rejection = reason
-        if reason:
-            return reason
-        self.pending = Pending(target, now + self.latency_ns, quote.mid)
-        self.risk.record_order(now)
-        return None
-
-    def on_quote(self, quote, now, *, history=()):
-        self.risk.observe(quote, self.account)
-        if self.risk.halted:
-            self.pending = None
-            self.last_rejection = self.risk.halted
-            return self.flatten(quote) if self.account.position else None
-        if not self.pending or now < self.pending.due:
-            return None
-        pending, self.pending = self.pending, None
-        self.last_rejection = self.risk.check(
-            pending.target, quote, self.account, now, history=history, count_rate=False
-        )
-        if self.last_rejection:
-            return None
-        self.last_signal_mid = pending.signal_mid
-        return self.account.target(pending.target, quote)
-
-    def flatten(self, quote):
-        self.pending = None
-        self.last_signal_mid = quote.mid
-        return self.account.target(0, quote)
-
-
-class EventLog:
-    def __init__(self, path):
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.file = path.open("x", buffering=1)  # do not overwrite or combine runs
-        self.run_id = uuid.uuid4().hex
-
-    def write(self, event, **values):
-        self.file.write(
-            json.dumps({"event": event, "run_id": self.run_id, **values}, allow_nan=False) + "\n"
-        )
-
-    def close(self):
-        self.file.close()
+NS = 1_000_000_000
+PaperBroker = LocalExecution
 
 
 class PaperEngine:
@@ -85,159 +22,338 @@ class PaperEngine:
         policy,
         *,
         log_path,
-        initial_cash=10_000.0,
+        initial_cash=500,
         costs=None,
         risk=None,
-        symbol="UNKNOWN",
+        sizing=None,
+        symbol="AAPL",
         synthetic=False,
         source="replay",
         latency_ms=75,
-        bar_seconds=1,
+        bar_seconds=5,
         metadata=None,
-        broker=None,
+        account=None,
+        submit_callback=None,
+        outstanding=None,
+        clock=time.time_ns,
     ):
         self.policy, self.symbol = policy, symbol
-        self.account = broker.account if broker else Account(initial_cash, costs or Costs())
-        self.risk = broker.risk if broker else risk or RiskGateway()
-        self.broker = broker or PaperBroker(self.account, self.risk, latency_ms)
+        self.account = account or Account(initial_cash, costs or Costs())
+        self.risk = risk or RiskGateway()
+        self.sizing = sizing or SizingConfig(
+            fee_per_share=self.account.costs.commission,
+            slippage_bps=self.account.costs.slippage_bps,
+        )
+        self.execution = LocalExecution(self.account, self.risk, latency_ms)
+        self.submit_callback = submit_callback
+        self.outstanding = outstanding or (lambda: self.execution.pending is not None)
         self.history = deque(maxlen=LOOKBACK + 1)
-        self.bar_seconds = bar_seconds
-        self.log = EventLog(log_path)
+        self.log = EventLog(log_path, clock=clock)
         self.source, self.synthetic = source, synthetic
-        self.last_bar, self.last_quote, self.day_start = None, None, None
-        self.day_trades, self.day_prices = 0, []
-        self.inference_us = []
+        self.session = self.aggregator = self.quote = None
+        self.bar_seconds = bar_seconds
         self.closed = False
+        self.session_complete = False
+        self.completed_sessions = 0
+        self.first_event_ns = self.last_event_ns = None
+        self.last_tick_ns = None
+        self._trade_count = len(self.account.trades)
         self.log.write(
             "start",
-            timestamp=time.time_ns(),
-            symbol=symbol,
-            synthetic=synthetic,
             source=source,
+            synthetic=synthetic,
+            symbol=symbol,
             initial_cash=self.account.initial_cash,
             costs=asdict(self.account.costs),
             risk=asdict(self.risk.config),
+            sizing=asdict(self.sizing),
             metadata=metadata or {},
             bar_seconds=bar_seconds,
+            latency_ms=latency_ms,
+            account_state=self.account.to_state(),
         )
 
-    def _fill(self, fill):
-        if isinstance(fill, list):
-            for execution in fill:
-                self._fill(execution)
-            return
-        if fill:
-            ref = self.broker.last_signal_mid or fill.price
-            slip = (fill.price / ref - 1) * (1 if fill.quantity > 0 else -1) * 10_000
-            self.log.write(
-                "fill",
-                **asdict(fill),
-                position=self.account.position,
-                cash=self.account.cash,
-                slippage_bps=slip,
+    def start_session(self, session, now_ns=None):
+        if self.session is not None:
+            self.end_session(complete=False)
+        self.session = session
+        self.aggregator = BarAggregator(self.symbol, self.bar_seconds, session)
+        if now_ns is not None and now_ns > session.open_ns:
+            self.aggregator.start = max(
+                session.open_ns, now_ns // (self.bar_seconds * NS) * (self.bar_seconds * NS)
             )
-            for trade in self.account.trades[self.day_trades :]:
-                self.log.write("trade", **asdict(trade), timestamp=trade.closed)
-            self.day_trades = len(self.account.trades)
+        self.history.clear()
+        self.quote = None
+        self.first_event_ns = self.last_event_ns = None
+        self.last_tick_ns = None
+        self.session_complete = now_ns is None or now_ns <= session.open_ns + NS
+        self.account.session_start_equity = self.account.cash
+        self.log.write(
+            "session_start", event_ns=now_ns or session.open_ns, calendar=asdict(session)
+        )
 
-    def on_quote(self, quote, now=None):
-        now = quote.timestamp if now is None else now
-        self.last_quote = quote
-        before = self.risk.halted
-        fill = self.broker.on_quote(quote, now, history=self.history)
-        self._fill(fill)
-        if self.risk.halted and self.risk.halted != before:
-            self.log.write("halt", timestamp=now, reason=self.risk.halted)
-        if self.broker.last_rejection:
-            self.log.write("rejection", timestamp=now, reason=self.broker.last_rejection)
-            self.broker.last_rejection = None
+    def snapshot(self):
+        if self.session is None:
+            raise ValueError("no active exchange session")
+        equity = self.account.mark(self.quote.mid) if self.quote else self.account.cash
+        return Snapshot(
+            self.quote,
+            self.session,
+            self.account.position,
+            equity,
+            self.account.initial_cash,
+            self.account.cash,
+            tuple(self.history),
+        )
 
-    def on_bar(self, bar, now=None, execution_quote=None):
-        now = bar.timestamp if now is None else now
-        if self.last_bar and bar.timestamp <= self.last_bar.timestamp:
-            raise ValueError("bars must advance monotonically")
-        if self.last_bar and session_day(bar.timestamp) != session_day(self.last_bar.timestamp):
-            self._fill(self.broker.flatten(self.last_quote or self.last_bar))
-            self._session(self.last_bar, complete=False)
-            self.day_start, self.day_prices = None, []
-        if self.last_bar and session_day(bar.timestamp) == session_day(self.last_bar.timestamp):
-            if bar.timestamp - self.last_bar.timestamp > 2 * self.bar_seconds * NS:
-                self.history.clear()
-                self.broker.pending = None
-                self.log.write("gap", timestamp=now)
-        self.on_quote(execution_quote or bar, now)
-        self.last_bar = bar
-        self.day_start = self.day_start or bar.timestamp
-        self.day_prices.append(bar.close)
-        self.history.append(bar)
-        if len(self.history) >= LOOKBACK + 1:
-            start = time.perf_counter_ns()
-            action = self.policy(observation(self.history, self.account))
-            elapsed = (time.perf_counter_ns() - start) / 1000
-            self.inference_us.append(elapsed)
-            if isinstance(action, bool) or action not in (0, 1, 2):
-                raise ValueError("invalid policy action")
-            target = TARGETS[int(action)]
-            reason = self.broker.submit(target, execution_quote or bar, now, history=self.history)
+    def record_fills(self, executions):
+        for execution in executions:
+            self.log.write("fill", event_ns=execution.timestamp_ns, execution=asdict(execution))
+        for trade in self.account.trades[self._trade_count :]:
+            self.log.write("trade", event_ns=trade.exit_ns, **asdict(trade))
+        self._trade_count = len(self.account.trades)
+        if executions and self.session and self.quote:
+            self.risk.observe(
+                self.snapshot(),
+                time.time_ns()
+                if self.source == "broker-paper" or self.source == "live"
+                else executions[-1].timestamp_ns,
+            )
             self.log.write(
-                "decision",
-                timestamp=now,
-                action=int(action),
-                target=target,
-                rejected=reason,
-                inference_us=elapsed,
+                "equity",
+                event_ns=executions[-1].timestamp_ns,
+                equity=self.snapshot().equity,
+                cash=self.account.cash,
+                position=self.account.position,
+            )
+
+    def _submit(self, action, now_ns, *, emergency=False):
+        if self.quote is None or self.outstanding():
+            return None
+        intent = make_intent(
+            action,
+            self.account,
+            self.quote,
+            self.sizing,
+            now_ns,
+            symbol=self.symbol,
+            emergency=emergency,
+        )
+        if intent is None:
+            return None
+        decision = self.risk.evaluate(intent, self.snapshot(), now_ns)
+        if decision.allowed:
+            if self.submit_callback:
+                self.submit_callback(intent)
+            else:
+                decision = self.execution.submit(intent, self.snapshot(), now_ns)
+            self.log.write(
+                "order", event_ns=now_ns, intent=asdict(intent), allowed=decision.allowed
+            )
+        else:
+            self.log.write("rejection", event_ns=now_ns, reason=decision.reason)
+        return decision.reason
+
+    def on_quote(self, quote, now_ns):
+        if self.quote is not None and quote.event_ns < self.quote.event_ns:
+            self.log.write("quality", event_ns=now_ns, reason="older_quote")
+            return
+        self.quote = quote
+        before = self.risk.halted
+        decision = self.risk.observe(self.snapshot(), now_ns)
+        if self.risk.halted and self.risk.halted != before:
+            self.log.write("halt", event_ns=now_ns, reason=self.risk.halted)
+        if decision.requires_flatten:
+            if (
+                not self.submit_callback
+                and self.execution.pending
+                and self.execution.pending.side == "buy"
+            ):
+                self.execution.cancel()
+            self._submit(0, now_ns, emergency=True)
+        if not self.submit_callback:
+            self.record_fills(
+                self.execution.on_quote(quote, now_ns, tuple(self.history), self.session)
             )
         self.log.write(
             "equity",
-            timestamp=bar.timestamp,
-            equity=self.account.equity(bar.close),
-            position=self.account.position,
+            event_ns=now_ns,
+            equity=self.snapshot().equity,
             cash=self.account.cash,
+            position=self.account.position,
         )
 
-    def _session(self, bar, complete):
-        import numpy as np
-
-        changes = np.diff(np.log(self.day_prices)) if len(self.day_prices) > 1 else np.array([0.0])
-        volatility = float(np.sqrt(np.sum(changes**2)))
-        trend = abs(self.day_prices[-1] / self.day_prices[0] - 1) if self.day_prices else 0
-        regime = (
-            "high_volatility" if volatility > 0.01 else "trending" if trend > 0.005 else "choppy"
+    def on_bar(self, bar, now_ns):
+        if self.history and bar.end_ns - self.history[-1].end_ns != self.bar_seconds * NS:
+            self.history.clear()
+            self.session_complete = False
+            self.log.write("gap", event_ns=now_ns, reason="bar_gap")
+        self.history.append(bar)
+        decision = self.risk.observe(self.snapshot(), now_ns)
+        if decision.requires_flatten:
+            self._submit(0, now_ns, emergency=True)
+        if len(self.history) >= LOOKBACK + 1:
+            start = time.perf_counter_ns()
+            action = self.policy(
+                observation(
+                    tuple(self.history),
+                    self.account,
+                    self.risk,
+                    self.session,
+                    now_ns=now_ns,
+                    quote=self.quote,
+                )
+            )
+            if isinstance(action, bool) or action not in (0, 1):
+                raise ValueError("invalid policy action")
+            reason = self._submit(
+                0 if decision.requires_flatten else action,
+                now_ns,
+                emergency=decision.requires_flatten,
+            )
+            self.log.write(
+                "decision",
+                event_ns=now_ns,
+                bar_end_ns=bar.end_ns,
+                action=int(action),
+                rejected=reason,
+                inference_us=(time.perf_counter_ns() - start) / 1000,
+            )
+        self.log.write(
+            "equity",
+            event_ns=now_ns,
+            equity=self.snapshot().equity,
+            cash=self.account.cash,
+            position=self.account.position,
         )
+
+    def on_event(self, event, arrival_ns):
+        if self.session is None:
+            raise ValueError("start a session before market events")
+        self.log.write("market", event_ns=arrival_ns, payload={**event, "arrival_ns": arrival_ns})
+        if self.last_event_ns is not None and arrival_ns - self.last_event_ns > 5 * NS:
+            self.history.clear()
+            self.session_complete = False
+            self.log.write("gap", event_ns=arrival_ns, reason="feed_gap")
+            if not self.submit_callback:
+                self.execution.cancel()
+        self.first_event_ns = self.first_event_ns or arrival_ns
+        self.last_event_ns = arrival_ns
+        for bar in self.aggregator.add(event, arrival_ns):
+            self.on_bar(bar, arrival_ns)
+        if event.get("T") == "q":
+            quote = quote_from_event(event, arrival_ns)
+            if self.session.contains(quote.event_ns) and quote.event_ns <= arrival_ns + 250_000_000:
+                self.on_quote(quote, arrival_ns)
+
+    def tick(self, now_ns):
+        if self.session is None:
+            return
+        if self.last_tick_ns is not None and now_ns - self.last_tick_ns > 5 * NS:
+            self.history.clear()
+            self.session_complete = False
+            self.log.write("gap", event_ns=now_ns, reason="runtime_sleep")
+            self.risk.halted = "runtime_gap"
+            if not self.submit_callback:
+                self.execution.cancel()
+        self.last_tick_ns = now_ns
+        completed = self.aggregator.advance_to(now_ns)
+        if completed or now_ns >= self.session.close_ns - int(
+            self.risk.config.pre_close_seconds * NS
+        ):
+            self.log.write("timer", event_ns=now_ns)
+        for bar in completed:
+            self.on_bar(bar, now_ns)
+        if self.quote:
+            decision = self.risk.observe(self.snapshot(), now_ns)
+            if decision.requires_flatten:
+                self._submit(0, now_ns, emergency=True)
+        if (
+            not self.submit_callback
+            and self.execution.pending
+            and (
+                now_ns - self.execution.pending.created_ns
+                >= self.risk.config.order_expiry_seconds * NS
+            )
+        ):
+            self.execution.cancel()
+
+    def end_session(self, *, complete=False, reconciled=True):
+        if self.session is None:
+            return
+        fresh_end = (
+            self.last_event_ns is not None and self.last_event_ns >= self.session.close_ns - 2 * NS
+        )
+        full_start = (
+            self.first_event_ns is not None and self.first_event_ns <= self.session.open_ns + 5 * NS
+        )
+        valid = (
+            complete
+            and self.session_complete
+            and fresh_end
+            and full_start
+            and reconciled
+            and self.account.position == 0
+            and not self.outstanding()
+        )
+        if valid:
+            self.completed_sessions += 1
         self.log.write(
             "session",
-            timestamp=bar.timestamp,
-            date=session_day(bar.timestamp),
-            started=self.day_start,
-            complete=complete,
-            regime=regime,
-            equity=self.account.equity(bar.close),
+            event_ns=self.session.close_ns,
+            date=self.session.session_id,
+            calendar=asdict(self.session),
+            complete=valid,
+            reconciled=reconciled,
+            equity=self.account.cash,
             position=self.account.position,
+            first_event_ns=self.first_event_ns,
+            last_event_ns=self.last_event_ns,
         )
-
-    def close_session(self, quote, complete=True):
-        self._fill(self.broker.flatten(quote))
-        if self.last_bar:
-            self._session(self.last_bar, complete)
-        self.day_start, self.day_prices, self.last_bar = None, [], None
+        self.session = self.aggregator = None
         self.history.clear()
 
-    def finish(self, quote=None, *, complete=False):
+    def finish(self, *, complete=False, reconciled=True):
         if self.closed:
             return
         try:
-            if quote:
-                self._fill(self.broker.flatten(quote))
-                if self.last_bar:
-                    self._session(self.last_bar, complete)
+            self.end_session(complete=complete, reconciled=reconciled)
+            self.finished_complete = bool(
+                complete
+                and self.source == "broker-paper"
+                and reconciled
+                and self.account.position == 0
+                and not self.outstanding()
+            )
             self.log.write(
                 "finish",
-                timestamp=time.time_ns(),
-                complete=complete,
+                complete=self.finished_complete,
                 position=self.account.position,
                 cash=self.account.cash,
-                equity=self.account.equity(quote.mid) if quote else self.account.cash,
+                unresolved=self.outstanding(),
+                reconciled=reconciled,
             )
         finally:
             self.closed = True
             self.log.close()
+
+
+def replay_sessions(engine, sessions):
+    from .calendar import SessionWindow
+
+    for data in sessions:
+        engine.start_session(SessionWindow(data.session_id, data.open_ns, data.close_ns))
+        for event in data.iter_events():
+            now = event.get("arrival_ns") or event["event_ns"]
+            engine.on_event(event, now)
+        engine.tick(data.close_ns)
+        engine.end_session(complete=True)
+    engine.finish(complete=False)
+    return {
+        "cash": str(engine.account.cash),
+        "position": str(engine.account.position),
+        "trades": len(engine.account.trades),
+        "log": str(engine.log.path),
+        "synthetic": engine.synthetic,
+        "source": engine.source,
+    }

@@ -32,12 +32,12 @@ async def record(symbol, output, duration=None, stream=None):
     atomic_json(output / "calendar.json", {"calendar": calendar, "provenance": "alpaca-calendar"})
     start = time.monotonic()
     count = 0
-    iterator = (stream or alpaca_events(symbol)).__aiter__()
+    iterator = (stream or alpaca_events(symbol, timeout=None)).__aiter__()
     try:
         with path.open("x", buffering=1) as file:
             while duration is None or time.monotonic() - start < duration:
                 _check_disk(output, 1024 * 1024)
-                timeout = min(5, duration - (time.monotonic() - start)) if duration else 5
+                timeout = max(0.001, duration - (time.monotonic() - start)) if duration else None
                 try:
                     event = await asyncio.wait_for(
                         iterator.__anext__(), timeout=max(0.001, timeout)

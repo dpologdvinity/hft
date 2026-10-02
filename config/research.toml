@@ -1,0 +1,5 @@
+timesteps = 100000
+seeds = [42, 43]
+n_envs = 4
+wall_seconds = 7200
+initial_cash = 500.0

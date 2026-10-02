@@ -1,77 +1,76 @@
-import json
-
 import pytest
 
-from hft.account import Costs
-from hft.data import synthetic_data
-from hft.features import FEATURE_NAMES
-from hft.policy import OnnxPolicy, export_model
-from hft.research import evaluate, metrics, paired_bootstrap, walk_forward
+from hft.research import eligibility, make_folds, temporal_split
 
 
-def test_walk_forward_is_temporal_and_test_context_has_no_future():
-    data = synthetic_data(days=8, bars_per_day=100)
-    folds = walk_forward(data, train_days=3, test_days=2)
-    assert [(s.train_stop, s.test_start, s.test_stop) for s in folds] == [
-        (300, 300, 500),
-        (500, 500, 700),
+def test_frozen_split_exact_dates_and_fold_endpoints():
+    ids = [f"{i:03d}" for i in range(120)]
+    dev, test = temporal_split(ids)
+    assert dev == ids[:90] and test == ids[90:]
+    folds = make_folds(dev)
+    assert [(len(f.train), len(f.validation)) for f in folds] == [(54, 12), (66, 12), (78, 12)]
+    assert all(set(f.train).isdisjoint(f.validation) for f in folds)
+    assert set().union(*(set(f.train) | set(f.validation) for f in folds)).isdisjoint(test)
+    with pytest.raises(ValueError, match="insufficient"):
+        temporal_split(ids[:60])
+
+
+def test_synthetic_and_small_sample_cannot_graduate():
+    report = {
+        "policy": {
+            "sessions": 30,
+            "trades": 1,
+            "expectancy": 1,
+            "net_profit": 1,
+            "profit_factor": "infinite",
+            "max_drawdown": 0,
+        },
+        "stress": {"net_profit": 1},
+        "edge": {"intraday_long": {"positive": True}},
+    }
+    result = eligibility(report, synthetic=True, primary_control="intraday_long")
+    assert not result["passed"]
+    assert (
+        "synthetic-data" in result["reasons"]
+        and "insufficient-completed-trades" in result["reasons"]
+    )
+
+
+def test_ema_arithmetic_and_actual_frequency_control():
+    import numpy as np
+
+    from hft.data import synthetic_sessions
+    from hft.research import ema, evaluate
+
+    assert ema([10, 13, 16], 5).tolist() == pytest.approx([10, 11, 12 + 2 / 3])
+    result, observations = evaluate(synthetic_sessions(1, 100, 11), lambda obs: 1)
+    assert result["cash"]["net_profit"] == 0
+    assert len(result["random"]["runs"]) == 20
+    assert result["random"]["matched_fill_frequency"]
+    assert all(
+        r["session_fills"] == result["policy"]["session_fills"] for r in result["random"]["runs"]
+    )
+    assert observations.dtype == np.float32 and observations.shape[1] == 17
+
+
+def test_freeze_before_search_and_insufficient_history(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from hft.research import freeze_experiment
+
+    source = tmp_path / "dataset.json"
+    source.write_text("{}")
+    sessions = [
+        SimpleNamespace(session_id=f"{i:03d}", symbol="SPY", manifest={"synthetic": False})
+        for i in range(120)
     ]
-    for split in folds:
-        assert data.rows[split.train_stop - 1].timestamp < data.rows[split.test_start].timestamp
-        assert split.context_start == split.test_start - 61
-    with pytest.raises(ValueError):
-        walk_forward(data, 0, 2)
-
-
-def test_metrics_use_daily_returns_and_closed_net_trades():
-    result = metrics([1000, 1010, 1005, 1020], [5, -2, 3])
-    assert result["net_profit"] == 20
-    assert result["max_drawdown"] == pytest.approx(5 / 1010)
-    assert result["profit_factor"] == 4
-    assert result["expectancy"] == 2
-    assert result["trades"] == 3
-    assert result["sharpe"] > 0
-    assert metrics([1000, 1000], [])["profit_factor"] is None
-    assert metrics([1000, 1001], [1])["profit_factor"] is None  # no losses, JSON safe
-
-
-def test_evaluation_costs_and_matched_random_change_frequency():
-    data = synthetic_data(days=3, bars_per_day=100)
-    result = evaluate(data, lambda obs: 1, costs=Costs(0.01, 0), seed=1)
-    assert set(result) == {"policy", "buy_hold", "random", "candlestick", "edge"}
-    assert result["policy"]["fills"] == 6
-    assert result["policy"]["target_changes"] == 1  # model target, excluding daily flatten
-    assert result["random"]["target_changes"] == 1
-    assert len(result["policy"]["daily_equity"]) == 3
-    assert result["policy"]["trades"] == 3
-    assert result["edge"]["random"]["samples"] == 3
-
-
-def test_paired_bootstrap_detects_constant_edge_reproducibly():
-    first = paired_bootstrap([0.02] * 40, [0.01] * 40, seed=4)
-    assert first["lower"] == pytest.approx(0.01)
-    assert first["positive"] is True
-    assert first == paired_bootstrap([0.02] * 40, [0.01] * 40, seed=4)
-    assert not paired_bootstrap([0.01], [0])["positive"]  # insufficient evidence
-
-
-def test_real_ppo_export_runtime_parity_and_metadata_validation(tmp_path):
-    from stable_baselines3 import PPO
-
-    from hft.env import TradingEnv
-
-    env = TradingEnv(synthetic_data(days=3, bars_per_day=100), episode_steps=64)
-    model = PPO("MlpPolicy", env, n_steps=64, batch_size=32, seed=3, device="cpu", verbose=0)
-    model.learn(total_timesteps=128)
-    path = tmp_path / "policy.onnx"
-    export_model(model, path, symbol="SYNTH", costs=Costs(), synthetic=True, bar_seconds=1)
-    runtime = OnnxPolicy(path)
-    obs, _ = env.reset()
-    assert runtime(obs) == int(model.predict(obs, deterministic=True)[0])
-    assert runtime.metadata["feature_names"] == list(FEATURE_NAMES)
-    metadata_path = path.with_suffix(".json")
-    metadata = json.loads(metadata_path.read_text())
-    metadata["feature_version"] = -1
-    metadata_path.write_text(json.dumps(metadata))
-    with pytest.raises(ValueError):
-        OnnxPolicy(path)
+    monkeypatch.setattr("hft.data.load_dataset", lambda path: sessions)
+    result = freeze_experiment(source, {}, tmp_path / "experiment.json")
+    assert result["status"] == "frozen" and result["final_test"] == [
+        f"{i:03d}" for i in range(90, 120)
+    ]
+    assert not result["final_test_consumed"]
+    with pytest.raises(FileExistsError):
+        freeze_experiment(source, {}, tmp_path / "experiment.json")
+    monkeypatch.setattr("hft.data.load_dataset", lambda path: sessions[:60])
+    assert freeze_experiment(source, {}, tmp_path / "small.json")["status"] == "insufficient-data"

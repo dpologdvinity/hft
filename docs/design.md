@@ -1,10 +1,12 @@
 # Trading research and paper execution
 
-The supplied `PROMPT.md` is the engineering brief. Build an end-to-end,
+The user's clarified request is the engineering brief; `PROMPT.md` is background. Build an end-to-end,
 single-symbol US-equity research system, with discrete flat/long/short
 one-share targets and a Python ONNX execution runtime. No profitability or
-sub-millisecond latency is assumed. No real-money orders are submitted by
-this implementation: promotion is evidence, not permission to deploy.
+sub-millisecond latency is assumed. Offline training compares candidates
+on validation data, then reports an untouched test. Real-money routing is
+available only through a deliberate live command with adequate paper
+evidence; building or training never starts it.
 
 ## Data and accounting invariants
 
@@ -59,9 +61,11 @@ Paper account connectivity can be verified without sending real orders.
 Graduation requires at least 30 consecutive exchange sessions, coverage of
 three reported regimes, strictly positive net closed-trade expectancy,
 profit factor >= 1.3 and drawdown < 5%. Missing evidence fails closed.
-Live routing, automatic allocation scaling and live slippage auditing
-remain unavailable until real paper evidence and broker integration tests
-exist; research code must not pretend to have completed those phases.
+Broker paper/live routing uses explicit mode selection, account reconciliation,
+one outstanding order, idempotent client order IDs, actual fill tracking and
+emergency liquidation. Live mode requires explicit activation and adequate
+paper evidence for the same model, symbol and costs. Automatic allocation
+scaling remains outside this initial one-share system.
 
 ## Acceptance
 

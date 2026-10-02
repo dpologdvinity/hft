@@ -95,6 +95,22 @@ def test_probe_counts_and_no_order_endpoints():
     assert all(url.endswith(("/calendar", "/quotes", "/trades")) for url, _ in f.calls)
 
 
+def test_history_preserves_quotes_with_same_prices_and_distinct_conditions(tmp_path):
+    class Conditions(Fake):
+        def get(self, url, params):
+            result = super().get(url, params)
+            if url.endswith("/quotes") and not params.get("page_token"):
+                result["quotes"] = [{**QUOTE, "c": ["?"]}, {**QUOTE, "c": ["R"]}]
+            return result
+
+    path = download_sessions("X", "2025-01-02", "2025-01-02", tmp_path, client=Conditions())
+    session = load_dataset(path)[0]
+    assert len(session.quote_ns) == 2
+    assert session.manifest["quote_metadata"]["c"].to_pylist() == [["?"], ["R"]]
+    identifiers = session.manifest["quote_metadata"]["i"].to_pylist()
+    assert identifiers[0] != identifiers[1]
+
+
 def test_readonly_transport_retry_budget_and_nonretryable():
     from urllib.error import HTTPError
 

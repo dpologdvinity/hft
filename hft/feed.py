@@ -63,6 +63,8 @@ def quote_from_event(event, arrival_ns=None) -> Quote:
             *[format(v.normalize(), "f") for v in (bid, ask, bid_size, ask_size)],
             event.get("bx") or "",
             event.get("ax") or "",
+            event.get("c") or [],
+            event.get("z") or "",
         ]
         identity = hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
     return Quote(str(identity), stamp, arrival_ns, bid, ask, bid_size, ask_size)

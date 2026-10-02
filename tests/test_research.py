@@ -182,3 +182,72 @@ def test_rollout_carries_peak_risk_and_permanent_halt_between_sessions(monkeypat
     assert result["max_drawdown"] == pytest.approx(0.23)
     assert created[-1].risk.peak == Decimal(100)
     assert created[-1].risk.permanent_halt
+
+
+def test_realtime_partial_sessions_never_supply_qualifying_provenance(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from hft.research import freeze_experiment
+
+    source = tmp_path / "dataset.json"
+    source.write_text("{}")
+    sessions = [
+        SimpleNamespace(
+            session_id=f"{i:03d}",
+            symbol="SPY",
+            manifest={
+                "synthetic": False,
+                "feed": "iex",
+                "provenance": "alpaca-realtime-iex",
+                "complete_session": True,
+            },
+        )
+        for i in range(120)
+    ]
+    sessions[-1].manifest["complete_session"] = False
+    monkeypatch.setattr("hft.data.load_dataset", lambda path: sessions)
+    result = freeze_experiment(source, {}, tmp_path / "experiment.json")
+    assert result["status"] == "frozen" and not result["real_executable_data"]
+
+
+def test_nonfinite_metric_or_confidence_lower_cannot_pass_gate():
+    from hft.research import eligibility
+
+    report = {
+        "policy": {
+            "sessions": 30,
+            "trades": 100,
+            "expectancy": 1,
+            "net_profit": 100,
+            "profit_factor": "infinite",
+            "gross_profit": 100,
+            "gross_loss": 0,
+            "max_drawdown": 0,
+        },
+        "stress": {"net_profit": 100},
+        "edge": {"intraday_long": {"positive": True, "lower": 0.01}},
+    }
+    assert eligibility(report, synthetic=False, primary_control="intraday_long")["passed"]
+    report["edge"]["intraday_long"]["lower"] = float("nan")
+    assert not eligibility(report, synthetic=False, primary_control="intraday_long")["passed"]
+    report["edge"]["intraday_long"]["lower"] = 0.01
+    report["policy"]["gross_profit"] = float("nan")
+    assert not eligibility(report, synthetic=False, primary_control="intraday_long")["passed"]
+
+
+def test_json_infinity_is_not_explicit_infinite_profit_factor():
+    report = {
+        "policy": {
+            "sessions": 30,
+            "trades": 100,
+            "expectancy": 1,
+            "net_profit": 100,
+            "profit_factor": float("inf"),
+            "gross_profit": 100,
+            "gross_loss": 0,
+            "max_drawdown": 0,
+        },
+        "stress": {"net_profit": 100},
+        "edge": {"intraday_long": {"positive": True, "lower": 0.01}},
+    }
+    assert not eligibility(report, synthetic=False, primary_control="intraday_long")["passed"]

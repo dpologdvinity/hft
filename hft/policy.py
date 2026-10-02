@@ -214,9 +214,18 @@ def validate_bundle(path):
     from .risk import RiskConfig
     from .sizing import SizingConfig
 
-    Costs(**metadata["costs"])
-    RiskConfig(**metadata["risk"])
-    SizingConfig(**metadata["sizing"])
+    try:
+        Costs(**metadata["costs"])
+        RiskConfig(**metadata["risk"])
+        SizingConfig(**metadata["sizing"])
+    except TypeError as error:
+        raise ValueError("unknown or invalid execution contract fields") from error
+    if (
+        not isinstance(metadata.get("latency_ms"), (int, float))
+        or not np.isfinite(metadata["latency_ms"])
+        or metadata["latency_ms"] < 0
+    ):
+        raise ValueError("invalid execution latency")
     if (
         metadata.get("bar_seconds") != 5
         or not metadata.get("symbol")

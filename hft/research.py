@@ -68,6 +68,17 @@ def temporal_split(session_ids):
     return dev, test
 
 
+def is_real_executable(session):
+    manifest = session.manifest
+    provenance = manifest.get("provenance")
+    return (
+        manifest.get("synthetic") is False
+        and manifest.get("feed") == "iex"
+        and provenance in ("alpaca-historical-iex", "alpaca-realtime-iex")
+        and (provenance != "alpaca-realtime-iex" or manifest.get("complete_session") is True)
+    )
+
+
 def freeze_experiment(dataset_manifest, config, output):
     from .data import load_dataset
     from .training import validate_config
@@ -87,13 +98,7 @@ def freeze_experiment(dataset_manifest, config, output):
         "symbol": sessions[0].symbol if sessions else None,
         "synthetic": any(s.manifest.get("synthetic", False) for s in sessions),
         "feed": sessions[0].manifest.get("feed", "unknown") if sessions else "unknown",
-        "real_executable_data": bool(sessions)
-        and all(
-            s.manifest.get("synthetic") is False
-            and s.manifest.get("feed") == "iex"
-            and s.manifest.get("provenance") in ("alpaca-historical-iex", "alpaca-realtime-iex")
-            for s in sessions
-        ),
+        "real_executable_data": bool(sessions) and all(is_real_executable(s) for s in sessions),
         "session_hashes": {
             s.session_id: canonical_hash(
                 {
@@ -317,17 +322,40 @@ def eligibility(report, *, synthetic, primary_control, real_executable_data=None
     policy = report["policy"]
     pf = policy["profit_factor"]
     reasons = []
+
+    def finite(value):
+        return (
+            isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        )
+
+    finite_statistics = all(
+        finite(policy.get(key))
+        for key in ("net_profit", "expectancy", "max_drawdown", "gross_profit", "gross_loss")
+    )
+    finite_statistics = finite_statistics and finite(report["stress"].get("net_profit"))
+    finite_statistics = finite_statistics and all(
+        type(policy.get(key)) is int and policy[key] >= 0 for key in ("sessions", "trades")
+    )
+    edge = report["edge"][primary_control]
+    lower = edge.get("lower")
     checks = {
+        "invalid-metric-samples": finite_statistics,
         "synthetic-data": not synthetic,
         "unverified-data-provenance": real_executable_data,
         "insufficient-test-sessions": policy["sessions"] >= 30,
         "insufficient-completed-trades": policy["trades"] >= 100,
         "nonpositive-expectancy": policy["expectancy"] > 0,
         "nonpositive-profit": policy["net_profit"] > 0,
-        "profit-factor-below-1.3": pf == "infinite" or isinstance(pf, (int, float)) and pf >= 1.3,
+        "profit-factor-below-1.3": (
+            pf == "infinite"
+            and finite(policy.get("gross_profit"))
+            and policy["gross_profit"] > 0
+            and policy.get("gross_loss") == 0
+        )
+        or (finite(pf) and pf >= 1.3),
         "drawdown-limit": policy["max_drawdown"] < 0.05,
         "nonpositive-stress-profit": report["stress"]["net_profit"] > 0,
-        "failed-control-edge": report["edge"][primary_control]["positive"],
+        "failed-control-edge": edge.get("positive") is True and finite(lower) and lower > 0,
         "incomplete-liquidation": not policy.get("incomplete", False),
         "unmatched-random-control": report.get("random", {}).get("matched_fill_frequency", True),
     }

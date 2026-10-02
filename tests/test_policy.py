@@ -56,3 +56,50 @@ def test_real_observation_onnx_bundle_and_tamper(tmp_path):
     (bundle / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="contract"):
         OnnxPolicy(bundle)
+
+
+@pytest.mark.parametrize(
+    "section,values",
+    [
+        ("risk", {"max_daily_loss": 2}),
+        ("sizing", {"allocation_fraction": 1}),
+        ("risk", {"unknown_setting": 1}),
+        ("sizing", {"unknown_setting": 1}),
+    ],
+)
+def test_semantically_invalid_execution_contract_rejected_even_rehashed(tmp_path, section, values):
+    from dataclasses import asdict
+
+    from hft.account import Costs
+    from hft.features import FEATURE_NAMES, FEATURE_VERSION
+    from hft.policy import contract_hash, digest, validate_bundle
+    from hft.risk import RiskConfig
+    from hft.sizing import SizingConfig
+
+    (tmp_path / "model.onnx").write_bytes(b"weights")
+    metadata = {
+        "sha256": digest(tmp_path / "model.onnx"),
+        "feature_version": FEATURE_VERSION,
+        "feature_names": list(FEATURE_NAMES),
+        "targets": [0, 1],
+        "symbol": "SPY",
+        "feed": "iex",
+        "costs": asdict(Costs()),
+        "risk": asdict(RiskConfig()),
+        "sizing": asdict(SizingConfig()),
+        "latency_ms": 75,
+        "bar_seconds": 5,
+        "initial_cash": 500,
+    }
+    metadata[section].update(values)
+    metadata["execution_hash"] = contract_hash(
+        {
+            k: metadata[k]
+            for k in ("costs", "risk", "sizing", "latency_ms", "bar_seconds", "symbol", "feed")
+        }
+    )
+    manifest = {"metadata": metadata, "research": {}}
+    manifest["contract_hash"] = contract_hash(manifest)
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError):
+        validate_bundle(tmp_path)

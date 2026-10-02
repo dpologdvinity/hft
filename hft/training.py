@@ -11,7 +11,14 @@ from pathlib import Path
 
 import numpy as np
 
-from .research import CANDIDATES, atomic_json, canonical_hash, eligibility, evaluate
+from .research import (
+    CANDIDATES,
+    atomic_json,
+    canonical_hash,
+    eligibility,
+    evaluate,
+    is_real_executable,
+)
 
 TEST_REGISTRY = Path(__file__).resolve().parents[1] / ".state" / "research-final-tests.json"
 
@@ -444,12 +451,7 @@ def train(
         "synthetic": synthetic,
         "symbol": sessions[0].symbol,
         "feed": sessions[0].manifest.get("feed", "synthetic"),
-        "real_executable_data": all(
-            s.manifest.get("synthetic") is False
-            and s.manifest.get("feed") == "iex"
-            and s.manifest.get("provenance") in ("alpaca-historical-iex", "alpaca-realtime-iex")
-            for s in sessions
-        ),
+        "real_executable_data": all(is_real_executable(s) for s in sessions),
         "config": config,
         "candidates": candidates,
         "session_ids": ids,

@@ -73,3 +73,84 @@ def test_twenty_session_loading_aggregation_memory_budget(tmp_path):
     assert len(sessions) == 20
     assert all(len(build_bars(s)) == 80 for s in sessions)
     assert resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024 < 8 * 1024**3
+
+
+def test_parquet_float_nanoseconds_rejected_before_cast(tmp_path):
+    import json
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from hft.data import atomic_json, checksum, load_session
+
+    save_dataset(synthetic_sessions(1, 1), tmp_path)
+    directory = tmp_path / "SYNTH/2025-01-06"
+    q = directory / "quotes.parquet"
+    table = pq.read_table(q)
+    table = table.set_column(0, "quote_ns", pa.array(table["quote_ns"].to_numpy().astype(float)))
+    pq.write_table(table, q)
+    m = json.loads((directory / "manifest.json").read_text())
+    m["partitions"]["quotes"]["sha256"] = checksum(q)
+    atomic_json(directory / "manifest.json", m)
+    with pytest.raises(ValueError, match="int64"):
+        load_session(directory / "manifest.json")
+
+
+def test_arrow_metadata_budget_preflight_precedes_session_load(tmp_path, monkeypatch):
+    import pyarrow as pa
+
+    from hft import data
+
+    sessions = synthetic_sessions(2, 1)
+    sessions = [
+        replace(
+            s,
+            manifest={
+                **s.manifest,
+                "quote_metadata": {"raw_json": pa.array(["x" * 4000] * len(s.quote_ns))},
+            },
+        )
+        for s in sessions
+    ]
+    path = save_dataset(sessions, tmp_path)
+    monkeypatch.setattr(data, "MAX_DATASET_BYTES", 300_000)
+    calls = []
+    original = data.load_session
+
+    def tracked(*args, **kwargs):
+        calls.append(args[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(data, "load_session", tracked)
+    with pytest.raises(ValueError, match="memory budget"):
+        data.load_dataset(path)
+    assert len(calls) <= 1
+
+
+def test_immutable_constructor_metadata_budget_before_copy(monkeypatch):
+    import pyarrow as pa
+
+    from hft import data
+
+    s = synthetic_sessions(1, 1)[0]
+    monkeypatch.setattr(data, "MAX_SESSION_BYTES", 1000)
+    copies = []
+    monkeypatch.setattr(data.np, "ascontiguousarray", lambda *args, **kw: copies.append(True))
+    with pytest.raises(ValueError, match="memory budget"):
+        replace(
+            s,
+            manifest={
+                **s.manifest,
+                "quote_metadata": {"raw_json": pa.array(["x" * 4000] * len(s.quote_ns))},
+            },
+        )
+    assert not copies
+
+
+def test_preflight_reserves_defensive_numeric_copy(tmp_path, monkeypatch):
+    from hft import data
+
+    p = save_dataset(synthetic_sessions(1, 1), tmp_path)
+    monkeypatch.setattr(data, "MAX_WORKING_BYTES", 3000)
+    with pytest.raises(ValueError, match="working memory budget"):
+        data.load_dataset(p)

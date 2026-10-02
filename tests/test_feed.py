@@ -80,3 +80,15 @@ def test_excluded_close_condition_and_too_late():
     b = a.advance_to(BASE + 5 * NS)[0]
     assert b.close == 100 and b.volume == 1
     assert a.quality["filtered_trades"] == 1 and a.quality["late_tolerance"] == 1
+
+
+def test_quote_identity_distinguishes_same_timestamp_price_and_depth():
+    from hft.feed import quote_from_event
+
+    one = q(1)
+    two = {**one, "ap": 101.0}
+    three = {**one, "as": 3}
+    assert len({quote_from_event(e).quote_id for e in (one, two, three)}) == 3
+    assert quote_from_event(one).quote_id == quote_from_event(dict(one)).quote_id
+    shares = {**one, "bs": 100.0, "as": 200.0, "sizes_in_shares": True}
+    assert quote_from_event(one).quote_id == quote_from_event(shares).quote_id

@@ -21,6 +21,18 @@ NY = ZoneInfo("America/New_York")
 NS = 1_000_000_000
 AGGREGATION_VERSION = "causal-5s-v2-close-conditions-250ms"
 MAX_SESSION_BYTES = 2 * 1024**3
+MAX_DATASET_BYTES = 6 * 1024**3
+MAX_WORKING_BYTES = 8 * 1024**3
+NUMERIC_NAMES = (
+    "quote_ns",
+    "bid",
+    "ask",
+    "bid_size",
+    "ask_size",
+    "trade_ns",
+    "trade_price",
+    "trade_size",
+)
 
 
 def local_time(timestamp: int) -> datetime:
@@ -167,7 +179,10 @@ class SessionData:
     def __post_init__(self):
         if not self.symbol or self.open_ns <= 0 or self.close_ns <= self.open_ns:
             raise ValueError("invalid session metadata")
-        total = 0
+        total = sum(len(getattr(self, name)) * 8 for name in NUMERIC_NAMES)
+        total += metadata_bytes(self.manifest)
+        if total > MAX_SESSION_BYTES:
+            raise ValueError("session exceeds memory budget")
         for names in [
             ("quote_ns", "bid", "ask", "bid_size", "ask_size"),
             ("trade_ns", "trade_price", "trade_size"),
@@ -197,7 +212,6 @@ class SessionData:
                     raise ValueError("invalid price or size")
                 a.flags.writeable = False
                 object.__setattr__(self, name, a)
-                total += a.nbytes
         if total > MAX_SESSION_BYTES:
             raise ValueError("session exceeds memory budget")
         if np.any(self.bid > self.ask):
@@ -427,8 +441,72 @@ def save_dataset(sessions, path) -> Path:
     return manifest_path
 
 
-def load_session(manifest_path: Path) -> SessionData:
+def metadata_bytes(manifest):
+    """Count retained Arrow buffers, including raw JSON/conditions/identifiers."""
+    total = 0
+    for kind in ("quote_metadata", "trade_metadata"):
+        for values in manifest.get(kind, {}).values():
+            if isinstance(values, (pa.Array, pa.ChunkedArray, np.ndarray)):
+                total += values.nbytes
+            else:
+                # Only small caller fixtures use Python metadata; Arrow is authoritative on disk.
+                total += pa.array(values).nbytes
+    return total
+
+
+def session_bytes(session):
+    return sum(getattr(session, name).nbytes for name in NUMERIC_NAMES) + metadata_bytes(
+        session.manifest
+    )
+
+
+def _session_preflight(path, resident_bytes=0):
+    path = Path(path)
+    m = json.loads(path.read_text())
+    if m.get("status") != "complete":
+        raise ValueError("incomplete session")
+    numeric = metadata = 0
+    for kind, names in [("quotes", NUMERIC_NAMES[:5]), ("trades", NUMERIC_NAMES[5:])]:
+        part = m["partitions"][kind]
+        target = path.parent / part["path"]
+        if checksum(target) != part["sha256"]:
+            raise ValueError("partition checksum mismatch")
+        file = pq.ParquetFile(target, memory_map=True)
+        rows = file.metadata.num_rows
+        if rows != part["rows"]:
+            raise ValueError("partition row count mismatch")
+        for name in names:
+            dtype = file.schema_arrow.field(name).type
+            if name.endswith("_ns") and dtype != pa.int64():
+                raise ValueError("timestamp Parquet columns must be exact int64 nanoseconds")
+        if (
+            "arrival_ns" in file.schema_arrow.names
+            and file.schema_arrow.field("arrival_ns").type != pa.int64()
+        ):
+            raise ValueError("arrival timestamps must be exact int64 nanoseconds")
+        numeric += rows * len(names) * 8
+        if numeric > MAX_SESSION_BYTES:
+            raise ValueError("session exceeds memory budget")
+        # Scan only metadata in bounded Arrow batches before numeric allocation.
+        # Encoded Parquet byte sizes alone undercount dictionary-expanded raw JSON.
+        extra = [name for name in file.schema_arrow.names if name not in names]
+        for batch in file.iter_batches(batch_size=64, columns=extra):
+            metadata += batch.nbytes
+            retained = numeric + metadata
+            if retained > MAX_SESSION_BYTES or resident_bytes + retained > MAX_DATASET_BYTES:
+                raise ValueError("dataset/session exceeds resident memory budget")
+        # Preallocated arrays coexist with their immutable defensive copies.
+        if resident_bytes + 2 * numeric + metadata > MAX_WORKING_BYTES:
+            raise ValueError("dataset load exceeds working memory budget")
+    retained = numeric + metadata
+    if resident_bytes + retained > MAX_DATASET_BYTES:
+        raise ValueError("dataset exceeds resident memory budget; load individual sessions")
+    return retained
+
+
+def load_session(manifest_path: Path, *, resident_bytes=0) -> SessionData:
     path = Path(manifest_path)
+    _session_preflight(path, resident_bytes)
     m = json.loads(path.read_text())
     if m.get("status") != "complete":
         raise ValueError("incomplete session")
@@ -488,25 +566,9 @@ def load_dataset(path) -> list[SessionData]:
         target = path.parent / entry["manifest"]
         if checksum(target) != entry["sha256"]:
             raise ValueError("session manifest checksum mismatch")
-        result.append(load_session(target))
-        resident = sum(
-            sum(
-                getattr(s, name).nbytes
-                for name in (
-                    "quote_ns",
-                    "bid",
-                    "ask",
-                    "bid_size",
-                    "ask_size",
-                    "trade_ns",
-                    "trade_price",
-                    "trade_size",
-                )
-            )
-            for s in result
-        )
-        if resident > 6 * 1024**3:
-            raise ValueError("dataset exceeds resident memory budget; load individual sessions")
+        resident = sum(session_bytes(session) for session in result)
+        _session_preflight(target, resident)
+        result.append(load_session(target, resident_bytes=resident))
     if any(b.open_ns <= a.open_ns for a, b in itertools.pairwise(result)):
         raise ValueError("unordered sessions")
     return result

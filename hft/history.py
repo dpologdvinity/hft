@@ -1,6 +1,5 @@
 """Free IEX history: allowlisted GET-only transport and resumable raw partitions."""
 
-import hashlib
 import json
 import os
 import re
@@ -19,7 +18,7 @@ import pyarrow.parquet as pq
 
 from .calendar import calendar_from_records
 from .data import AGGREGATION_VERSION, NS, atomic_json, checksum
-from .feed import CONDITION_SOURCE, parse_timestamp
+from .feed import CONDITION_SOURCE, parse_timestamp, quote_from_event
 
 DATA_BASE = "https://data.alpaca.markets"
 CALENDAR_URL = "https://paper-api.alpaca.markets/v2/calendar"
@@ -184,6 +183,8 @@ def _schema(kind):
             ("c", pa.list_(pa.string())),
             ("x", pa.string()),
             ("z", pa.string()),
+            ("bx", pa.string()),
+            ("ax", pa.string()),
         ]
     )
 
@@ -227,10 +228,14 @@ def _write_partition(client, symbol, window, kind, target):
                     raw_json=json.dumps(raw, sort_keys=True, allow_nan=False),
                     i=str(raw["i"])
                     if "i" in raw
-                    else hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest(),
+                    else quote_from_event({**raw, "T": "q", "S": symbol}).quote_id
+                    if kind == "quotes"
+                    else str(stamp) + ":" + str(raw["p"]) + ":" + str(raw["s"]),
                     c=raw.get("c", []),
                     x=raw.get("x"),
                     z=raw.get("z"),
+                    bx=raw.get("bx"),
+                    ax=raw.get("ax"),
                 )
                 for name, value in normalized.items():
                     columns[name].append(value)

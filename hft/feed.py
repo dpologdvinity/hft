@@ -8,6 +8,7 @@ exact replication of minute bars with field-specific eligibility rules.
 """
 
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -52,19 +53,19 @@ def event_timestamp(event):
 def quote_from_event(event, arrival_ns=None) -> Quote:
     stamp = event_timestamp(event)
     factor = Decimal(1) if event.get("sizes_in_shares") else Decimal(100)
-    return Quote(
-        str(
-            event.get(
-                "quote_id", event.get("i", f"{stamp}:{event.get('bx', '')}:{event.get('ax', '')}")
-            )
-        ),
-        stamp,
-        arrival_ns,
-        Decimal(str(event["bp"])),
-        Decimal(str(event["ap"])),
-        Decimal(str(event["bs"])) * factor,
-        Decimal(str(event["as"])) * factor,
-    )
+    bid, ask = Decimal(str(event["bp"])), Decimal(str(event["ap"]))
+    bid_size, ask_size = Decimal(str(event["bs"])) * factor, Decimal(str(event["as"])) * factor
+    identity = event.get("quote_id") or event.get("i")
+    if identity is None:
+        payload = [
+            event.get("S", ""),
+            stamp,
+            *[format(v.normalize(), "f") for v in (bid, ask, bid_size, ask_size)],
+            event.get("bx") or "",
+            event.get("ax") or "",
+        ]
+        identity = hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
+    return Quote(str(identity), stamp, arrival_ns, bid, ask, bid_size, ask_size)
 
 
 class BarAggregator:

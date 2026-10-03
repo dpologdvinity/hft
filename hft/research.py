@@ -157,11 +157,11 @@ def load_experiment(path):
     return manifest | {"path": str(path)}
 
 
-def preflight_experiment(path, *, deadline=float("inf")):
+def preflight_experiment(path, *, deadline=float("inf"), inspect_all=False):
     """Check development decision coverage before fitting; never open final-test data.
 
-    Stop at the first unusable session, since one runtime hard-stop gap already
-    prevents the frozen experiment from qualifying. Partial coverage is explicit.
+    By default stop at the first unusable session. Explicit full inspection
+    continues ordinary usability failures, preserving integrity and resource guards.
     This establishes data usability, never profitability or trading eligibility.
     """
     from .data import checksum, load_session
@@ -191,6 +191,7 @@ def preflight_experiment(path, *, deadline=float("inf")):
         "coverage_sessions": 0,
         "development_sessions": len(development),
         "coverage_complete": False,
+        "inspection_mode": "all-development" if inspect_all else "stop-first-failure",
         "live_comparable": True,
         "sessions": [],
         "reasons": [] if development else ["insufficient-history"],
@@ -215,15 +216,21 @@ def preflight_experiment(path, *, deadline=float("inf")):
             or canonical_hash(identity) != manifest["session_hashes"][date]
         ):
             raise ValueError("session identity changed")
-        row = {"date": date, "eligible_decisions": 0, "ineligible_decisions": 0, "feed_gaps": 0}
+        row = {
+            "date": date,
+            "eligible_decisions": 0,
+            "ineligible_decisions": 0,
+            "feed_gaps": 0,
+            "reasons": [],
+        }
         if not is_real_executable(session) and not manifest.get("synthetic"):
-            result["reasons"].append("unverified-data-provenance")
+            row["reasons"].append("unverified-data-provenance")
         try:
             simulation = Simulation(session)
         except ValueError as exc:
             if str(exc) != "insufficient session warmup":
                 raise
-            result["reasons"].append("insufficient-decision-warmup")
+            row["reasons"].append("insufficient-decision-warmup")
         else:
             for next_bar in simulation.bars[61:]:
                 if time.monotonic() >= deadline:
@@ -235,17 +242,22 @@ def preflight_experiment(path, *, deadline=float("inf")):
                 simulation.advance_to(next_bar.end_ns)
             row["feed_gaps"] = simulation.gap_count
             if row["feed_gaps"]:
-                result["reasons"].append("runtime-feed-gap")
+                row["reasons"].append("runtime-feed-gap")
             if not row["eligible_decisions"]:
-                result["reasons"].append("insufficient-decision-warmup")
+                row["reasons"].append("insufficient-decision-warmup")
             del simulation
         del session
+        total = row["eligible_decisions"] + row["ineligible_decisions"]
+        row["eligible_fraction"] = row["eligible_decisions"] / total if total else None
+        result["reasons"].extend(row["reasons"])
         result["sessions"].append(row)
         result["coverage_sessions"] += 1
         for key in ("eligible_decisions", "ineligible_decisions", "feed_gaps"):
             result[key] += row[key]
-        if result["reasons"]:
+        if row["reasons"] and not inspect_all:
             break
+    total = result["eligible_decisions"] + result["ineligible_decisions"]
+    result["eligible_fraction"] = result["eligible_decisions"] / total if total else None
     result["coverage_complete"] = result["coverage_sessions"] == len(development)
     result["reasons"] = list(dict.fromkeys(result["reasons"]))
     if result["reasons"]:

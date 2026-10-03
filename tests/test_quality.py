@@ -7,8 +7,8 @@ from hft.features import FEATURE_VERSION
 from hft.research import canonical_hash
 
 
-def frozen(root, *, gap=False):
-    sessions = synthetic_sessions(3, 100, 42)
+def frozen(root, *, gap=False, bars=100, provenance="alpaca-historical-iex"):
+    sessions = synthetic_sessions(3, bars, 42)
     if gap:
         session = sessions[0]
         for names in (
@@ -22,7 +22,7 @@ def frozen(root, *, gap=False):
             for name in names:
                 object.__setattr__(session, name, getattr(session, name)[keep])
     for session in sessions:
-        session.manifest.update(synthetic=False, feed="iex", provenance="alpaca-historical-iex")
+        session.manifest.update(synthetic=False, feed="iex", provenance=provenance)
     source = save_dataset(sessions, root / "data")
     dataset = json.loads(source.read_text())
     result = {
@@ -193,3 +193,145 @@ def test_quality_rejects_changed_identity_and_partitions(tmp_path):
     path.write_text(json.dumps(changed))
     with pytest.raises(ValueError, match="identity"):
         preflight_experiment(path)
+
+
+def refreeze(path, **changes):
+    manifest = json.loads(path.read_text())
+    manifest.update(changes)
+    manifest.pop("experiment_hash")
+    manifest["experiment_hash"] = canonical_hash(manifest)
+    path.write_text(json.dumps(manifest))
+
+
+def test_all_development_continues_after_gap_without_reading_final_test(tmp_path, monkeypatch):
+    from hft import data, research
+
+    path, source = frozen(tmp_path, gap=True)
+    entries = json.loads(source.read_text())["sessions"]
+    (source.parent / entries[-1]["manifest"]).write_text("never open reserved data")
+    calls = []
+    original = data.load_session
+
+    def load(target, **kwargs):
+        assert target != (source.parent / entries[-1]["manifest"]).resolve()
+        calls.append(target)
+        return original(target, **kwargs)
+
+    monkeypatch.setattr(data, "load_session", load)
+    default = research.preflight_experiment(path)
+    assert default["inspection_mode"] == "stop-first-failure"
+    assert default["coverage_sessions"] == 1 and default["coverage_complete"] is False
+    calls.clear()
+    result = research.preflight_experiment(path, inspect_all=True)
+    assert result["inspection_mode"] == "all-development"
+    assert result["coverage_sessions"] == 2 and result["coverage_complete"] is True
+    assert len(calls) == 2
+    assert result["status"] == "insufficient-data"
+    assert result["live_comparable"] is False and result["paper_eligible"] is False
+    assert result["sessions"][0]["reasons"] == ["runtime-feed-gap"]
+    assert result["sessions"][1]["reasons"] == []
+    for key in ("eligible_decisions", "ineligible_decisions", "feed_gaps"):
+        assert result[key] == sum(row[key] for row in result["sessions"])
+    assert json.loads(path.read_text())["final_test_consumed"] is False
+
+
+def test_full_inspection_preserves_published_report_on_later_corruption(tmp_path):
+    from hft import research
+
+    path, source = frozen(tmp_path, gap=True)
+    research.preflight_experiment(path)
+    report = path.parent / "diagnostics.json"
+    before = report.read_bytes()
+    entry = json.loads(source.read_text())["sessions"][1]
+    target = source.parent / entry["manifest"]
+    part = json.loads(target.read_text())["partitions"]["quotes"]["path"]
+    (target.parent / part).write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="checksum"):
+        research.preflight_experiment(path, inspect_all=True)
+    assert report.read_bytes() == before
+
+
+@pytest.mark.parametrize("change", ["duplicate", "overlap", "identity", "escaped", "index"])
+def test_full_inspection_still_validates_partition_identity(tmp_path, monkeypatch, change):
+    from hft import data, research
+
+    path, source = frozen(tmp_path)
+    manifest = json.loads(path.read_text())
+    if change == "duplicate":
+        refreeze(path, development=manifest["development"] * 2)
+    elif change == "overlap":
+        refreeze(path, development=manifest["final_test"])
+    elif change == "identity":
+        manifest["development"] = manifest["final_test"]
+        path.write_text(json.dumps(manifest))
+    else:
+        dataset = json.loads(source.read_text())
+        if change == "escaped":
+            dataset["sessions"][0]["manifest"] = "../outside.json"
+        else:
+            dataset["sessions"].append(dataset["sessions"][0])
+        source.write_text(json.dumps(dataset))
+        refreeze(path, dataset_hash=checksum(source))
+    monkeypatch.setattr(data, "load_session", lambda *a, **k: pytest.fail("tick load"))
+    with pytest.raises(ValueError, match="partition|identity|escapes|index"):
+        research.preflight_experiment(path, inspect_all=True)
+
+
+@pytest.mark.parametrize("expire_after", [2, 40])
+def test_full_inspection_deadline_blocks_later_load_and_publication(
+    tmp_path, monkeypatch, expire_after
+):
+    from hft import data, research
+
+    path, _ = frozen(tmp_path)
+    research.preflight_experiment(path)
+    report = path.parent / "diagnostics.json"
+    before = report.read_bytes()
+    calls = []
+    original = data.load_session
+
+    def load(*args, **kwargs):
+        calls.append(args[0])
+        return original(*args, **kwargs)
+
+    ticks = 0
+
+    def clock():
+        nonlocal ticks
+        ticks += 1
+        return 0 if ticks <= expire_after else 2
+
+    monkeypatch.setattr(data, "load_session", load)
+    monkeypatch.setattr(research.time, "monotonic", clock)
+    with pytest.raises(TimeoutError, match="preflight"):
+        research.preflight_experiment(path, inspect_all=True, deadline=1)
+    assert len(calls) == 1
+    assert report.read_bytes() == before
+
+
+@pytest.mark.parametrize("case", ["good", "empty", "short", "provenance"])
+def test_quality_ratios_and_empty_development(tmp_path, case):
+    from hft import research
+
+    path, _ = frozen(
+        tmp_path,
+        bars=10 if case == "short" else 100,
+        provenance="unknown" if case == "provenance" else "alpaca-historical-iex",
+    )
+    if case == "empty":
+        refreeze(path, development=[])
+    result = research.preflight_experiment(path, inspect_all=True)
+    assert result["coverage_complete"] is True and result["paper_eligible"] is False
+    assert result["status"] == ("data-ready" if case == "good" else "insufficient-data")
+    expected_reasons = {
+        "good": [],
+        "empty": ["insufficient-history"],
+        "short": ["insufficient-decision-warmup"],
+        "provenance": ["unverified-data-provenance"],
+    }
+    assert result["reasons"] == expected_reasons[case]
+    for row in [result, *result["sessions"]]:
+        total = row["eligible_decisions"] + row["ineligible_decisions"]
+        assert row["eligible_fraction"] == (row["eligible_decisions"] / total if total else None)
+    if case == "short":
+        assert all(row["eligible_fraction"] is None for row in result["sessions"])

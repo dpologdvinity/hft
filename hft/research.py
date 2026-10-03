@@ -275,6 +275,8 @@ def preflight_experiment(path, *, deadline=float("inf"), inspect_all=False):
     result["reasons"] = list(dict.fromkeys(result["reasons"]))
     if result["reasons"]:
         result.update(status="insufficient-data", live_comparable=False)
+    if time.monotonic() >= deadline:
+        raise TimeoutError("research wall-clock ceiling reached during data preflight")
     atomic_json(Path(path).parent / "diagnostics.json", result)
     return result
 

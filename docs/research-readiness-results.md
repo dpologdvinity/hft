@@ -141,7 +141,12 @@ cannot replace HFT accounting or qualification.
   isolation, per-row reasons, checksum/identity/path/index validation, deadlines,
   previous-report preservation, zero denominators, provenance, metadata sizing,
   unchanged events, session buffer release, RSS conversion and CLI dispatch/help.
-- Full Python rerun: **188 passed**, two existing ONNX exporter deprecation
+- Independent final review found one final-publication deadline gap. A check
+  immediately before atomic publication now rejects expiry during the final
+  decision, final short session or empty traversal. All four new regression
+  cases failed before the fix and pass after it; expired runs preserve the
+  previous report. No Critical or Minor review findings remain.
+- Final full Python rerun: **192 passed in 73.76s**, two existing ONNX exporter deprecation
   warnings. The first sandbox run hit denied loopback socket creation; that
   dashboard test passed with socket access. A stalled command wrapper required
   a full rerun with loopback access and faulthandler reporting; no application

@@ -389,3 +389,47 @@ def test_quality_reports_memory_without_changing_events(tmp_path, monkeypatch, g
         )
         assert memory["retained_bytes"] == memory["numeric_bytes"] + memory["metadata_bytes"]
         assert memory["process_peak_rss_bytes"] == 12345 * 1024
+
+
+@pytest.mark.parametrize("case", ["last-decision", "last-warmup", "empty", "default-last-decision"])
+def test_preflight_deadline_preserves_report_after_final_work(tmp_path, monkeypatch, case):
+    from hft import execution, research
+
+    path, _ = frozen(
+        tmp_path, gap=case == "last-decision", bars=10 if case == "last-warmup" else 100
+    )
+    research.preflight_experiment(path)
+    report = path.parent / "diagnostics.json"
+    before = report.read_bytes()
+    last = json.loads(path.read_text())["development"][-1]
+    expired = False
+    if case == "empty":
+        refreeze(path, development=[])
+        expired = True
+    elif case == "last-warmup":
+        original = execution.Simulation
+
+        def simulation(session):
+            nonlocal expired
+            try:
+                return original(session)
+            finally:
+                if session.session_id == last:
+                    expired = True
+
+        monkeypatch.setattr(execution, "Simulation", simulation)
+    else:
+        original = execution.Simulation.advance_to
+
+        def advance_to(simulation, now_ns):
+            nonlocal expired
+            result = original(simulation, now_ns)
+            if simulation.data.session_id == last and now_ns == simulation.bars[-1].end_ns:
+                expired = True
+            return result
+
+        monkeypatch.setattr(execution.Simulation, "advance_to", advance_to)
+    monkeypatch.setattr(research.time, "monotonic", lambda: 2 if expired else 0)
+    with pytest.raises(TimeoutError, match="preflight"):
+        research.preflight_experiment(path, inspect_all=case != "default-last-decision", deadline=1)
+    assert report.read_bytes() == before

@@ -127,12 +127,13 @@ before loading the next. Setup, preflight and fitting all count toward the cumul
 training time budget. Resuming a completed final report preserves it.
 
 The current local MCD dataset has 82 real IEX sessions, with 52 development and
-30 reserved final-test sessions. Its feature-v3 experiment is
-`artifacts/mcd-v3/experiment.json`. The first development session fails coverage:
-936 event gaps, 42 eligible warmup decisions and 4,577 ineligible decisions.
-Training is blocked before fitting, and profitability remains unproven. Use data
-with sufficient continuity for these execution rules; extra training cannot fix
-missing market coverage.
+30 reserved final-test sessions. Full inspection of
+`artifacts/mcd-v3/experiment.json` found gaps in all 52 development sessions:
+2,054 eligible and 238,106 ineligible decisions (0.855% eligible), 57,049 gaps.
+Diagnostic peak RSS was 295.16 MiB; no model was fitted or qualified. Training
+remains blocked before fitting. See [measured results and next project](docs/research-readiness-results.md)
+for identities, memory details and limitations. Extra training cannot fix missing
+market coverage.
 
 Reports include cash, risk-matched intraday long, EMA 5/20, twenty random controls,
 transaction costs, completed flat-to-flat trades, quote-level drawdown, stress

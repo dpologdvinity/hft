@@ -7,6 +7,9 @@ It makes decisions every **5 seconds**. A laptop and free IEX data are a practic
 starting point for automated intraday trading; this does not provide exchange
 colocation or submillisecond high-frequency execution.
 
+The current
+real-data experiment is blocked by development coverage; no model has qualified.
+
 Start with the offline engineering check:
 
 ```bash

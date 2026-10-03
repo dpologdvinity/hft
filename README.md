@@ -89,6 +89,7 @@ handle holidays, DST and early closes.
 ```bash
 python -m hft experiment --dataset data/aapl/manifest.json --config config/research.toml --output artifacts/aapl/experiment.json
 python -m hft data-quality --experiment artifacts/aapl/experiment.json
+python -m hft data-quality --experiment artifacts/aapl/experiment.json --all-development
 python -m hft train --experiment artifacts/aapl/experiment.json
 python -m hft train --experiment artifacts/aapl/experiment.json --resume
 python -m hft report --experiment artifacts/aapl/experiment.json
@@ -108,8 +109,22 @@ warmup coverage and gaps. Training runs this check automatically before fitting.
 Any event gap over the runtime's five-second limit blocks the experiment; fewer
 than 61 completed bars or unverified data provenance also fail. The check stops
 at the first unusable session and records the number checked in `diagnostics.json`.
-It does not evaluate the final test. Setup, preflight and fitting all count toward
-the cumulative training time budget. Resuming a completed final report preserves it.
+Pass `--all-development` to inspect every development session despite ordinary
+coverage/provenance failures. Complete coverage can still be insufficient data;
+per-session reasons and eligible fractions explain the result. Integrity, loader
+memory limits and training deadlines remain enforced. Neither mode fits a model,
+reads reserved final-test prices or establishes paper eligibility. Both modes
+atomically write `diagnostics.json` beside the frozen experiment after successful
+traversal; exceptions preserve the previous report. A later default preflight can
+replace a full report with a correctly labelled prefix.
+
+Each session reports numeric and metadata bytes, metadata column sizes and retained
+total using the loader's existing buffer accounting. These counts exclude Python
+object overhead, simulation timeline indices and transient copies. Process peak
+RSS is reported separately in bytes: it is the cumulative process lifetime high
+water mark, not that session's allocation. Full inspection releases each session
+before loading the next. Setup, preflight and fitting all count toward the cumulative
+training time budget. Resuming a completed final report preserves it.
 
 The current local MCD dataset has 82 real IEX sessions, with 52 development and
 30 reserved final-test sessions. Its feature-v3 experiment is

@@ -47,6 +47,11 @@ def _parser():
         "data-quality", help="check development coverage without training or test evaluation"
     )
     quality.add_argument("--experiment", type=Path, required=True)
+    quality.add_argument(
+        "--all-development",
+        action="store_true",
+        help="inspect every development session; report failures without fitting or reading final-test data",
+    )
     report = commands.add_parser("report")
     report.add_argument("--experiment", type=Path, required=True)
     dashboard = commands.add_parser("dashboard", help="local read-only research dashboard")
@@ -162,7 +167,7 @@ def _handle(args):
     if args.command == "data-quality":
         from .research import preflight_experiment
 
-        return preflight_experiment(args.experiment)
+        return preflight_experiment(args.experiment, inspect_all=args.all_development)
     if args.command == "report":
         path = (
             args.experiment

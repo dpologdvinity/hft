@@ -43,3 +43,46 @@ def test_report_preserves_insufficient_history_result(tmp_path):
     result = command("report", "--experiment", str(path))
     assert result.returncode == 0
     assert json.loads(result.stdout)["status"] == "insufficient-data"
+
+
+def test_data_quality_help_explains_all_development():
+    result = command("data-quality", "--help")
+    assert result.returncode == 0
+    help_text = " ".join(result.stdout.split())
+    assert "--all-development" in help_text
+    assert "inspect every development session" in help_text
+    assert "report failures" in help_text
+    assert "without fitting or reading final-test data" in help_text
+
+
+def quality_dispatch(monkeypatch, *, all_development):
+    from pathlib import Path
+
+    from hft import cli, research
+
+    for key in os.environ:
+        if key.startswith("ALPACA_"):
+            monkeypatch.delenv(key)
+
+    def preflight(path, *, inspect_all):
+        assert path == Path("artifacts/example/experiment.json")
+        assert inspect_all is all_development
+        return {"inspection_mode": "all-development" if inspect_all else "stop-first-failure"}
+
+    monkeypatch.setattr(research, "preflight_experiment", preflight)
+    args = ["data-quality", "--experiment", "artifacts/example/experiment.json"]
+    if all_development:
+        args.append("--all-development")
+    return cli._handle(cli._parser().parse_args(args))
+
+
+def test_data_quality_defaults_to_early_stop(monkeypatch):
+    assert quality_dispatch(monkeypatch, all_development=False) == {
+        "inspection_mode": "stop-first-failure"
+    }
+
+
+def test_data_quality_explicitly_requests_all_development(monkeypatch):
+    assert quality_dispatch(monkeypatch, all_development=True) == {
+        "inspection_mode": "all-development"
+    }

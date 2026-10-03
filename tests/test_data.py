@@ -154,3 +154,40 @@ def test_preflight_reserves_defensive_numeric_copy(tmp_path, monkeypatch):
     monkeypatch.setattr(data, "MAX_WORKING_BYTES", 3000)
     with pytest.raises(ValueError, match="working memory budget"):
         data.load_dataset(p)
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_metadata_column_bytes_preserves_total_accounting(empty):
+    import pyarrow as pa
+
+    from hft.data import NUMERIC_NAMES, metadata_bytes, metadata_column_bytes, session_bytes
+
+    manifest = (
+        {}
+        if empty
+        else {
+            "quote_metadata": {
+                "raw_json": pa.array(["x" * 10000, "y" * 10000]),
+                "chunked": pa.chunked_array([[1], [2]], type=pa.int64()),
+                "numpy": np.array([1, 2], dtype=np.int64),
+                "fixture": [1, 2],
+            },
+            "trade_metadata": {"flags": pa.array([True, False])},
+        }
+    )
+    expected = {"quote_metadata": {}, "trade_metadata": {}}
+    if not empty:
+        expected = {
+            "quote_metadata": {"raw_json": 20008, "chunked": 16, "numpy": 16, "fixture": 16},
+            "trade_metadata": {"flags": 1},
+        }
+    assert metadata_column_bytes(manifest) == expected
+    assert metadata_bytes(manifest) == (20057 if not empty else 0)
+    session = synthetic_sessions(1, 1)[0]
+    session = replace(
+        session,
+        **{name: getattr(session, name)[:2] for name in NUMERIC_NAMES},
+        manifest={**session.manifest, **manifest},
+    )
+    numeric = sum(getattr(session, name).nbytes for name in NUMERIC_NAMES)
+    assert session_bytes(session) == numeric + (20057 if not empty else 0)

@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import resource
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -164,7 +165,7 @@ def preflight_experiment(path, *, deadline=float("inf"), inspect_all=False):
     continues ordinary usability failures, preserving integrity and resource guards.
     This establishes data usability, never profitability or trading eligibility.
     """
-    from .data import checksum, load_session
+    from .data import checksum, load_session, metadata_bytes, metadata_column_bytes, session_bytes
     from .execution import Simulation
     from .features import FEATURE_VERSION
 
@@ -246,6 +247,18 @@ def preflight_experiment(path, *, deadline=float("inf"), inspect_all=False):
             if not row["eligible_decisions"]:
                 row["reasons"].append("insufficient-decision-warmup")
             del simulation
+        metadata = metadata_bytes(session.manifest)
+        retained = session_bytes(session)
+        row["memory"] = {
+            "numeric_bytes": retained - metadata,
+            "metadata_bytes": metadata,
+            "retained_bytes": retained,
+            "metadata_columns_bytes": metadata_column_bytes(session.manifest),
+            # Linux ru_maxrss is KiB; this is a process lifetime peak, not a session allocation.
+            "process_peak_rss_bytes": int(
+                resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+            ),
+        }
         del session
         total = row["eligible_decisions"] + row["ineligible_decisions"]
         row["eligible_fraction"] = row["eligible_decisions"] / total if total else None

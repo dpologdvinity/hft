@@ -7,7 +7,7 @@ from hft.features import FEATURE_VERSION
 from hft.research import canonical_hash
 
 
-def frozen(root, *, gap=False, bars=100, provenance="alpaca-historical-iex"):
+def frozen(root, *, gap=False, bars=100, provenance="alpaca-historical-iex", metadata=False):
     sessions = synthetic_sessions(3, bars, 42)
     if gap:
         session = sessions[0]
@@ -21,6 +21,14 @@ def frozen(root, *, gap=False, bars=100, provenance="alpaca-historical-iex"):
             )
             for name in names:
                 object.__setattr__(session, name, getattr(session, name)[keep])
+    if metadata:
+        import pyarrow as pa
+
+        for session in sessions:
+            session.manifest["quote_metadata"] = {
+                "raw_json": pa.array(['{"source":"fixture"}'] * len(session.quote_ns))
+            }
+            session.manifest["trade_metadata"] = {"flags": [1] * len(session.trade_ns)}
     for session in sessions:
         session.manifest.update(synthetic=False, feed="iex", provenance=provenance)
     source = save_dataset(sessions, root / "data")
@@ -335,3 +343,49 @@ def test_quality_ratios_and_empty_development(tmp_path, case):
         assert row["eligible_fraction"] == (row["eligible_decisions"] / total if total else None)
     if case == "short":
         assert all(row["eligible_fraction"] is None for row in result["sessions"])
+
+
+@pytest.mark.parametrize("gap", [False, True])
+def test_quality_reports_memory_without_changing_events(tmp_path, monkeypatch, gap):
+    import resource
+    import weakref
+    from types import SimpleNamespace
+
+    from hft import data, research
+
+    path, _ = frozen(tmp_path, gap=gap, metadata=True)
+    original_load = data.load_session
+    original_size = data.session_bytes
+    prior = None
+    numeric = []
+
+    def load(*args, **kwargs):
+        nonlocal prior
+        if prior is not None:
+            assert prior() is None, "previous session retained across loads"
+        session = original_load(*args, **kwargs)
+        prior = weakref.ref(session.bid)
+        numeric.append(sum(getattr(session, name).nbytes for name in data.NUMERIC_NAMES))
+        return session
+
+    def size(session):
+        before = list(session.iter_events())
+        result = original_size(session)
+        assert list(session.iter_events()) == before
+        return result
+
+    monkeypatch.setattr(data, "load_session", load)
+    monkeypatch.setattr(data, "session_bytes", size)
+    monkeypatch.setattr(resource, "getrusage", lambda _: SimpleNamespace(ru_maxrss=12345))
+    result = research.preflight_experiment(path, inspect_all=True)
+    for row, expected_numeric in zip(result["sessions"], numeric, strict=True):
+        memory = row["memory"]
+        for key in ("numeric_bytes", "metadata_bytes", "retained_bytes", "process_peak_rss_bytes"):
+            assert isinstance(memory[key], int) and memory[key] >= 0
+        assert memory["numeric_bytes"] == expected_numeric
+        assert memory["metadata_bytes"] > 0
+        assert memory["metadata_bytes"] == sum(
+            sum(columns.values()) for columns in memory["metadata_columns_bytes"].values()
+        )
+        assert memory["retained_bytes"] == memory["numeric_bytes"] + memory["metadata_bytes"]
+        assert memory["process_peak_rss_bytes"] == 12345 * 1024

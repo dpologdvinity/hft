@@ -440,17 +440,23 @@ def save_dataset(sessions, path) -> Path:
     return manifest_path
 
 
+def metadata_column_bytes(manifest) -> dict[str, dict[str, int]]:
+    """Size referenced metadata buffers using the loader's existing accounting."""
+    return {
+        kind: {
+            name: int(values.nbytes)
+            if isinstance(values, (pa.Array, pa.ChunkedArray, np.ndarray))
+            # Only small caller fixtures use Python metadata; Arrow owns on-disk columns.
+            else pa.array(values).nbytes
+            for name, values in manifest.get(kind, {}).items()
+        }
+        for kind in ("quote_metadata", "trade_metadata")
+    }
+
+
 def metadata_bytes(manifest):
     """Count retained Arrow buffers, including raw JSON/conditions/identifiers."""
-    total = 0
-    for kind in ("quote_metadata", "trade_metadata"):
-        for values in manifest.get(kind, {}).values():
-            if isinstance(values, (pa.Array, pa.ChunkedArray, np.ndarray)):
-                total += values.nbytes
-            else:
-                # Only small caller fixtures use Python metadata; Arrow is authoritative on disk.
-                total += pa.array(values).nbytes
-    return total
+    return sum(sum(columns.values()) for columns in metadata_column_bytes(manifest).values())
 
 
 def session_bytes(session):

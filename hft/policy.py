@@ -37,11 +37,11 @@ def _export(model, path, samples):
             self.policy = policy
 
         def forward(self, obs):
-            return self.policy(obs, deterministic=True)[0]
+            features = self.policy.extract_features(obs)
+            latent = self.policy.mlp_extractor.forward_actor(features)
+            return self.policy.action_net(latent).argmax(dim=1)
 
-    actor = Actor(model.policy.cpu().eval())
-    # Legacy exporter is supported by the pinned Torch/SB3 versions. Its
-    # deprecation warnings remain visible; runtime parity is mandatory.
+    actor = Actor(model.policy.cpu().eval()).eval()
     torch.onnx.export(
         actor,
         torch.from_numpy(samples[:1]),
@@ -49,8 +49,8 @@ def _export(model, path, samples):
         opset_version=17,
         input_names=["observation"],
         output_names=["action"],
-        dynamic_axes={"observation": {0: "batch"}, "action": {0: "batch"}},
-        dynamo=False,
+        dynamic_shapes={"obs": {0: torch.export.Dim("batch", min=1)}},
+        dynamo=True,
     )
     onnx.checker.check_model(onnx.load(str(path)))
     session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
@@ -146,9 +146,9 @@ def export_bundle(checkpoint, experiment, output, *, observations=None):
             "real_observation_parity_samples": real_count,
             "package_versions": {
                 p: importlib.metadata.version(p)
-                for p in ("torch", "stable-baselines3", "onnx", "onnxruntime")
+                for p in ("torch", "stable-baselines3", "onnx", "onnxruntime", "onnxscript")
             },
-            "exporter": "torch.onnx.export(dynamo=False, opset=17)",
+            "exporter": "torch.onnx.export(dynamo=True, opset=17)",
             "created_at": time.time(),
         }
         metadata["execution_hash"] = contract_hash(

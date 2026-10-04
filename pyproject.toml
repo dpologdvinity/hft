@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-train = ["stable-baselines3>=2.4,<3", "torch>=2.4,<3", "onnx>=1.17,<2"]
+train = ["stable-baselines3>=2.4,<3", "torch>=2.4,<3", "onnx>=1.17,<2", "onnxscript>=0.3"]
 dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
 
 [project.scripts]

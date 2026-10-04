@@ -7,8 +7,8 @@ It makes decisions every **5 seconds**. A laptop and free IEX data are a practic
 starting point for automated intraday trading; this does not provide exchange
 colocation or submillisecond high-frequency execution.
 
-The current
-real-data experiment is blocked by development coverage; no model has qualified.
+The current real-data experiment is blocked by development coverage; no model
+has qualified.
 
 Start with the offline engineering check:
 
@@ -40,7 +40,7 @@ npm --prefix frontend run build
 python -m hft dashboard
 ```
 
-Open **http://127.0.0.1:8765**. Overview, Research and Paper trading show local
+Open **<http://127.0.0.1:8765>**. Overview, Research and Paper trading show local
 dataset history, recorded training outcomes, data-quality diagnostics and verified
 paper journals. Refresh runs automatically every 30 seconds. Failed reads retain
 the last snapshot and label it stale. The dashboard binds to your computer only,

@@ -322,8 +322,17 @@ def _search_impl(sessions, experiment, output, resume=False, smoke=False):
             experiment["path"],
             {k: v for k, v in experiment.items() if k not in ("path", "_deadline")},
         )
+    if experiment.get("dataset_manifest"):
+        from .data import session_bytes
+        from .research import load_phase_sessions
+
+        test_sessions = load_phase_sessions(
+            experiment, "final_test", resident_bytes=sum(session_bytes(s) for s in sessions)
+        )
+    else:
+        test_sessions = [by_id[i] for i in experiment["final_test"]]
     test, observations = evaluate(
-        [by_id[i] for i in experiment["final_test"]],
+        test_sessions,
         lambda o, model=model: int(model.predict(o, deterministic=True)[0]),
         initial_cash=cfg["initial_cash"],
         seed=seed,
@@ -407,8 +416,7 @@ def _partial(output, trials):
 
 
 def run_search(experiment, output=None, resume=False):
-    from .data import load_dataset
-    from .research import load_experiment, preflight_experiment
+    from .research import load_experiment, load_phase_sessions, preflight_experiment
 
     started = time.monotonic()
     path = Path(experiment)
@@ -451,7 +459,6 @@ def run_search(experiment, output=None, resume=False):
         records = [json.loads(p.read_text()) for p in output.glob("*.json")]
         return [r for r in records if "key" in r and "checkpoint_hash" in r]
 
-    source = Path(manifest["dataset_manifest"])
     try:
         if manifest.get("synthetic") is False and not manifest.get("final_test_consumed"):
             coverage = preflight_experiment(path, deadline=deadline)
@@ -468,7 +475,7 @@ def run_search(experiment, output=None, resume=False):
                 return result
         if time.monotonic() >= deadline:
             raise TimeoutError("research wall-clock ceiling reached during setup")
-        sessions = load_dataset(source)
+        sessions = load_phase_sessions(manifest, "development")
         if time.monotonic() >= deadline:
             raise TimeoutError("research wall-clock ceiling reached during dataset loading")
     except TimeoutError:

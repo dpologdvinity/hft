@@ -64,7 +64,13 @@ def test_freeze_before_search_and_insufficient_history(tmp_path, monkeypatch):
         SimpleNamespace(session_id=f"{i:03d}", symbol="SPY", manifest={"synthetic": False})
         for i in range(120)
     ]
-    monkeypatch.setattr("hft.data.load_dataset", lambda path: sessions)
+    monkeypatch.setattr(
+        "hft.data.load_dataset_manifests",
+        lambda path: [
+            (source, {"symbol": s.symbol, "session_id": s.session_id, **s.manifest})
+            for s in sessions
+        ],
+    )
     result = freeze_experiment(source, {}, tmp_path / "experiment.json")
     assert result["status"] == "frozen" and result["final_test"] == [
         f"{i:03d}" for i in range(90, 120)
@@ -72,7 +78,13 @@ def test_freeze_before_search_and_insufficient_history(tmp_path, monkeypatch):
     assert not result["final_test_consumed"]
     with pytest.raises(FileExistsError):
         freeze_experiment(source, {}, tmp_path / "experiment.json")
-    monkeypatch.setattr("hft.data.load_dataset", lambda path: sessions[:60])
+    monkeypatch.setattr(
+        "hft.data.load_dataset_manifests",
+        lambda path: [
+            (source, {"symbol": s.symbol, "session_id": s.session_id, **s.manifest})
+            for s in sessions[:60]
+        ],
+    )
     assert freeze_experiment(source, {}, tmp_path / "small.json")["status"] == "insufficient-data"
 
 
@@ -205,7 +217,13 @@ def test_realtime_partial_sessions_never_supply_qualifying_provenance(tmp_path, 
         for i in range(120)
     ]
     sessions[-1].manifest["complete_session"] = False
-    monkeypatch.setattr("hft.data.load_dataset", lambda path: sessions)
+    monkeypatch.setattr(
+        "hft.data.load_dataset_manifests",
+        lambda path: [
+            (source, {"symbol": s.symbol, "session_id": s.session_id, **s.manifest})
+            for s in sessions
+        ],
+    )
     result = freeze_experiment(source, {}, tmp_path / "experiment.json")
     assert result["status"] == "frozen" and not result["real_executable_data"]
 
@@ -394,7 +412,13 @@ def test_frozen_identity_changes_with_execution_feature_contract(
         SimpleNamespace(session_id=f"{i:03d}", symbol="SPY", manifest={"synthetic": False})
         for i in range(120)
     ]
-    monkeypatch.setattr("hft.data.load_dataset", lambda path: sessions)
+    monkeypatch.setattr(
+        "hft.data.load_dataset_manifests",
+        lambda path: [
+            (source, {"symbol": s.symbol, "session_id": s.session_id, **s.manifest})
+            for s in sessions
+        ],
+    )
     before = freeze_experiment(source, {}, tmp_path / "before.json")
     monkeypatch.setattr(importlib.import_module(module), field, value)
     after = freeze_experiment(source, {}, tmp_path / "after.json")

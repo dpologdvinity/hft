@@ -255,3 +255,5 @@ and [verification record](docs/progress.md) for contracts and proof. Run local
 verification with `python -m pytest -q`, `ruff check hft tests` and
 `ruff format --check hft tests`. Actual free-data access, profitable historical
 results and elapsed paper/live sessions remain external gates.
+
+Research continuation: [six-session free-data probe and loading correction](docs/free-data-suitability-results.md). NVDA passes both sampled dates; broader readiness and bounded training memory remain unproven.

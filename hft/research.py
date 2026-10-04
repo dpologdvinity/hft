@@ -22,6 +22,12 @@ def canonical_hash(value):
     ).hexdigest()
 
 
+def _session_manifest_hash(manifest):
+    return canonical_hash(
+        {k: v for k, v in manifest.items() if k not in ("quote_metadata", "trade_metadata")}
+    )
+
+
 def atomic_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -70,7 +76,10 @@ def temporal_split(session_ids):
 
 
 def is_real_executable(session):
-    manifest = session.manifest
+    return _is_real_executable_manifest(session.manifest)
+
+
+def _is_real_executable_manifest(manifest):
     provenance = manifest.get("provenance")
     return (
         manifest.get("synthetic") is False
@@ -81,16 +90,16 @@ def is_real_executable(session):
 
 
 def freeze_experiment(dataset_manifest, config, output):
-    from .data import AGGREGATION_VERSION, load_dataset
+    from .data import AGGREGATION_VERSION, load_dataset_manifests
     from .features import FEATURE_VERSION
     from .training import validate_config
 
     source = Path(dataset_manifest).resolve()
-    sessions = load_dataset(source)
+    sessions = [manifest for _, manifest in load_dataset_manifests(source)]
     config = validate_config(config)
-    if len({s.symbol for s in sessions}) > 1:
+    if len({s["symbol"] for s in sessions}) > 1:
         raise ValueError("research requires a single stock symbol")
-    ids = [s.session_id for s in sessions]
+    ids = [s["session_id"] for s in sessions]
     result = {
         "dataset_manifest": str(source),
         "dataset_hash": hashlib.sha256(source.read_bytes()).hexdigest(),
@@ -99,20 +108,12 @@ def freeze_experiment(dataset_manifest, config, output):
         "final_test_consumed": False,
         "feature_version": FEATURE_VERSION,
         "aggregation_version": AGGREGATION_VERSION,
-        "symbol": sessions[0].symbol if sessions else None,
-        "synthetic": any(s.manifest.get("synthetic", False) for s in sessions),
-        "feed": sessions[0].manifest.get("feed", "unknown") if sessions else "unknown",
-        "real_executable_data": bool(sessions) and all(is_real_executable(s) for s in sessions),
-        "session_hashes": {
-            s.session_id: canonical_hash(
-                {
-                    k: v
-                    for k, v in s.manifest.items()
-                    if k not in ("quote_metadata", "trade_metadata")
-                }
-            )
-            for s in sessions
-        },
+        "symbol": sessions[0]["symbol"] if sessions else None,
+        "synthetic": any(s.get("synthetic", False) for s in sessions),
+        "feed": sessions[0].get("feed", "unknown") if sessions else "unknown",
+        "real_executable_data": bool(sessions)
+        and all(_is_real_executable_manifest(s) for s in sessions),
+        "session_hashes": {s["session_id"]: _session_manifest_hash(s) for s in sessions},
     }
     try:
         dev, test = temporal_split(ids)
@@ -158,6 +159,41 @@ def load_experiment(path):
     return manifest | {"path": str(path)}
 
 
+def _validate_development_partition(manifest):
+    development = manifest.get("development", [])
+    final_test = manifest.get("final_test", [])
+    if (
+        len(development) != len(set(development))
+        or len(final_test) != len(set(final_test))
+        or set(development) & set(final_test)
+    ):
+        raise ValueError("invalid development partition")
+
+
+def load_phase_sessions(experiment, phase, *, resident_bytes=0):
+    """Load one frozen phase, checking prices only when that phase is authorized."""
+    from .data import checksum, load_dataset
+
+    if phase not in ("development", "final_test"):
+        raise ValueError("unknown research phase")
+    _validate_development_partition(experiment)
+    if phase == "final_test" and not experiment.get("final_test_consumed"):
+        raise ValueError("final test must be reserved before loading prices")
+    source = Path(experiment["dataset_manifest"])
+    if checksum(source) != experiment["dataset_hash"]:
+        raise ValueError("dataset identity changed")
+    sessions = load_dataset(source, session_ids=experiment[phase], resident_bytes=resident_bytes)
+    if [s.session_id for s in sessions] != experiment[phase]:
+        raise ValueError("research phase session order changed")
+    for session in sessions:
+        if (
+            _session_manifest_hash(session.manifest)
+            != experiment["session_hashes"][session.session_id]
+        ):
+            raise ValueError("session identity changed")
+    return sessions
+
+
 def preflight_experiment(path, *, deadline=float("inf"), inspect_all=False):
     """Check development decision coverage before fitting; never open final-test data.
 
@@ -172,10 +208,7 @@ def preflight_experiment(path, *, deadline=float("inf"), inspect_all=False):
     manifest = load_experiment(path)
     source = Path(manifest["dataset_manifest"])
     development = manifest.get("development", [])
-    if len(development) != len(set(development)) or set(development) & set(
-        manifest.get("final_test", [])
-    ):
-        raise ValueError("invalid development partition")
+    _validate_development_partition(manifest)
     entries = json.loads(source.read_text()).get("sessions", [])
     by_id = {entry["session_id"]: entry for entry in entries}
     if len(entries) != len(by_id) or any(date not in by_id for date in development):
@@ -207,14 +240,9 @@ def preflight_experiment(path, *, deadline=float("inf"), inspect_all=False):
         if checksum(target) != entry["sha256"]:
             raise ValueError("session manifest checksum mismatch")
         session = load_session(target)
-        identity = {
-            k: v
-            for k, v in session.manifest.items()
-            if k not in ("quote_metadata", "trade_metadata")
-        }
         if (
             session.session_id != date
-            or canonical_hash(identity) != manifest["session_hashes"][date]
+            or _session_manifest_hash(session.manifest) != manifest["session_hashes"][date]
         ):
             raise ValueError("session identity changed")
         row = {

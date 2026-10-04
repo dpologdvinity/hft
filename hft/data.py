@@ -6,6 +6,7 @@ import itertools
 import json
 import math
 import os
+import resource
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -471,6 +472,11 @@ def _session_preflight(path, resident_bytes=0):
     if m.get("status") != "complete":
         raise ValueError("incomplete session")
     numeric = metadata = 0
+    # Include model, prepared simulation and Python allocations. Linux peak RSS
+    # is conservative after releases, but never understates the existing process.
+    working_baseline = max(
+        resident_bytes, resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+    )
     for kind, names in [("quotes", NUMERIC_NAMES[:5]), ("trades", NUMERIC_NAMES[5:])]:
         part = m["partitions"][kind]
         target = path.parent / part["path"]
@@ -501,7 +507,7 @@ def _session_preflight(path, resident_bytes=0):
             if retained > MAX_SESSION_BYTES or resident_bytes + retained > MAX_DATASET_BYTES:
                 raise ValueError("dataset/session exceeds resident memory budget")
         # Preallocated arrays coexist with their immutable defensive copies.
-        if resident_bytes + 2 * numeric + metadata > MAX_WORKING_BYTES:
+        if working_baseline + 2 * numeric + metadata > MAX_WORKING_BYTES:
             raise ValueError("dataset load exceeds working memory budget")
     retained = numeric + metadata
     if resident_bytes + retained > MAX_DATASET_BYTES:
@@ -557,25 +563,61 @@ def load_session(manifest_path: Path, *, resident_bytes=0) -> SessionData:
     )
 
 
-def load_dataset(path) -> list[SessionData]:
+def load_dataset_manifests(path) -> list[tuple[Path, dict]]:
+    """Validate dataset identities and ordering without opening market partitions."""
     path = Path(path)
     if path.is_dir():
         path = path / "manifest.json"
     m = json.loads(path.read_text())
     if "sessions" not in m:
-        return [load_session(path)]
-    if m.get("status") != "complete":
-        raise ValueError("incomplete dataset")
-    result = []
-    for entry in m["sessions"]:
-        target = path.parent / entry["manifest"]
-        if checksum(target) != entry["sha256"]:
-            raise ValueError("session manifest checksum mismatch")
-        resident = sum(session_bytes(session) for session in result)
-        _session_preflight(target, resident)
-        result.append(load_session(target, resident_bytes=resident))
-    if any(b.open_ns <= a.open_ns for a, b in itertools.pairwise(result)):
+        result = [(path, m)]
+    else:
+        if m.get("status") != "complete":
+            raise ValueError("incomplete dataset")
+        result = []
+        for entry in m["sessions"]:
+            target = (path.parent / entry["manifest"]).resolve()
+            if not target.is_relative_to(path.parent.resolve()):
+                raise ValueError("session manifest escapes dataset")
+            if checksum(target) != entry["sha256"]:
+                raise ValueError("session manifest checksum mismatch")
+            manifest = json.loads(target.read_text())
+            if manifest.get("session_id") != entry["session_id"]:
+                raise ValueError("session identity changed")
+            result.append((target, manifest))
+    for _, manifest in result:
+        if manifest.get("status") != "complete":
+            raise ValueError("incomplete session")
+        if (
+            not manifest.get("symbol")
+            or not manifest.get("session_id")
+            or manifest["open_ns"] <= 0
+            or manifest["close_ns"] <= manifest["open_ns"]
+        ):
+            raise ValueError("invalid session metadata")
+    if len({m["session_id"] for _, m in result}) != len(result):
+        raise ValueError("duplicate session identity")
+    if any(b["open_ns"] <= a["open_ns"] for (_, a), (_, b) in itertools.pairwise(result)):
         raise ValueError("unordered sessions")
+    return result
+
+
+def load_dataset(path, *, session_ids=None, resident_bytes=0) -> list[SessionData]:
+    manifests = load_dataset_manifests(path)
+    if session_ids is not None:
+        ids = list(session_ids)
+        known = {m["session_id"] for _, m in manifests}
+        if len(ids) != len(set(ids)) or not set(ids) <= known:
+            raise ValueError("invalid dataset session selection")
+        selected = set(ids)
+        manifests = [(p, m) for p, m in manifests if m["session_id"] in selected]
+    result = []
+    resident = resident_bytes
+    for target, _ in manifests:
+        _session_preflight(target, resident)
+        session = load_session(target, resident_bytes=resident)
+        result.append(session)
+        resident += session_bytes(session)
     return result
 
 

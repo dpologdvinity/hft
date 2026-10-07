@@ -1,38 +1,96 @@
-# Local AI stock trader
+# HFT — Intraday Trading Research Platform
 
-This is a CPU-compatible stock research and trading system. It trains PPO on
-historical quote/trade events, evaluates unseen sessions, exports an immutable
-ONNX policy, and supports replay, local dry runs and Alpaca broker paper trading.
-It makes decisions every **5 seconds**. A laptop and free IEX data are a practical
-starting point for automated intraday trading; this does not provide exchange
-colocation or submillisecond high-frequency execution.
+[![CI](https://github.com/dpologdvinity/hft/actions/workflows/ci.yml/badge.svg)](https://github.com/dpologdvinity/hft/actions/workflows/ci.yml)
 
-The current real-data experiment is blocked by development coverage; no model
-has qualified.
+A local, CPU-only research system for intraday stock trading. It replays historical
+quote and trade events through a causal execution simulator, trains PPO policies
+against it, evaluates them on reserved unseen sessions, and deploys the selected
+policy as an immutable ONNX bundle for replay, local dry runs and gated
+Alpaca paper trading. Decisions are made every **5 seconds**; this is intraday
+research infrastructure, not colocated submillisecond execution.
 
-Start with the offline engineering check:
+**Python · PyTorch / Stable-Baselines3 · Gymnasium · ONNX Runtime · PyArrow / Parquet · React / Vite**
+
+> **Status:** the engineering platform is complete and tested. The current real-data
+> experiment (82 MCD sessions) is blocked by measured feed gaps in the development
+> data, so no model has qualified for trading. The system reports that honestly
+> rather than training on unusable data.
+
+![Local dashboard showing 82 real MCD sessions, 52 development sessions, 30 reserved final-test sessions, and training blocked by data quality.](docs/images/dashboard-overview.png)
+
+The screenshot shows actual local research artifacts. The chart is development-session
+trade history, not strategy returns; the $500 allocation is simulated.
+[Demo walkthrough and more screenshots](docs/demo.md).
+
+## Engineering highlights
+
+- **One causal execution contract.** Training, replay and live dry runs share the same
+  five-second bar publication, 17-feature observation, quote-level partial fills with
+  modeled latency and costs, Decimal accounting and persistent risk limits. Fills need
+  a genuine later quote; a bar close cannot invent liquidity.
+- **Leak-proof evaluation.** Chronological expanding folds, multiple seeds and
+  cost-matched controls (cash, intraday long, EMA crossover, 20 random policies,
+  paired block bootstrap). Final-test dates are durably reserved before their prices
+  can be opened, and tests spy on every loader stage to prove it.
+- **Measured performance work.** Profiling showed a memory-budget scan dominated
+  session loading. Fixing it and loading an execution-only metadata view made a
+  5.1M-quote session load **10× faster** with **63% less retained memory** and a
+  **33% lower peak RSS**, with identical simulation results.
+  [Results and method](docs/performance-results.md).
+- **Honest data diagnostics.** Development-only inspection of 240,160 decisions across
+  52 sessions found 57,049 feed gaps, blocking training before any fit.
+  [Measured readiness results](docs/research-readiness-results.md).
+- **Safe deployment path.** Hash-verified ONNX bundles with action-parity checks;
+  inference never imports the training stack. Broker paper trading uses durable
+  client order IDs, reconciliation and fail-closed risk latches; live trading needs
+  explicit activation, graduation evidence and a $10 canary cap.
+- **Read-only operator dashboard.** Loopback-only API with Host/Origin validation and
+  a responsive React UI that shows stale and empty states truthfully.
+
+## Architecture
+
+![Architecture: checked market archives feed a shared causal engine and gated research pipeline; verified ONNX policies support replay and streaming; a read-only dashboard observes development history, reports, and journals.](docs/images/architecture.svg)
+
+| Area | Modules |
+| --- | --- |
+| Data and provenance | `data.py`, `history.py`, `recording.py`, `calendar.py` |
+| Causal feed and execution | `feed.py`, `execution.py`, `account.py`, `sizing.py`, `risk.py` |
+| Learning and research | `features.py`, `env.py`, `training.py`, `research.py`, `metrics.py`, `evidence.py` |
+| Deployment and runtime | `policy.py`, `runtime.py`, `paper.py`, `broker.py`, `state.py`, `logs.py` |
+| Operator interface | `cli.py`, `dashboard.py`, `frontend/` |
+
+[Module boundaries and data flow](docs/architecture.md).
+
+## Quick start
+
+Requires Python 3.12 and, for the dashboard, Node.js 22. No credentials or market
+data are needed for the offline check.
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements-train.txt
+python -m pip install -r requirements-train.txt   # pinned CPU-only stack
 python -m pip install --no-deps -e .
 python -m hft smoke --output artifacts/my-smoke
 ```
 
-The smoke command performs actual PPO training, ONNX export/parity checks and
-quote-event replay. Its generated data is explicitly synthetic. Its report says
-`research-only`, and it cannot qualify a policy for streaming or live trading.
-Use a new output directory for each smoke run.
+The smoke command trains PPO on explicitly synthetic sessions, exports and verifies
+an ONNX bundle, and replays it through the quote-level simulator. Its report is
+labeled `research-only` and can never qualify a policy. Use a new output directory
+for each run. For inference only, install `requirements-runtime.txt` instead; the
+runtime imports neither Torch nor Stable-Baselines3.
 
-For inference-only installation, use `requirements-runtime.txt`. The runtime
-imports neither Torch nor Stable-Baselines3. `constraints.txt` records the package
-versions used during verification; the training requirements select CPU Torch.
-Python 3.12 or later is required. Training defaults to two CPU threads and four
-in-process environments, with a two-hour cumulative search budget and an 8GB
-process memory ceiling. Data has separate resident and transient memory guards.
+### Verify
 
-## Local dashboard
+```bash
+python -m pytest -q                      # 218 tests, synthetic fixtures only
+ruff check hft tests benchmarks && ruff format --check hft tests benchmarks
+npm --prefix frontend ci && npm --prefix frontend test && npm --prefix frontend run build
+```
+
+CI runs the same checks plus the smoke run on pushes to `master` and on pull requests.
+
+### Dashboard
 
 ```bash
 npm --prefix frontend ci
@@ -40,220 +98,44 @@ npm --prefix frontend run build
 python -m hft dashboard
 ```
 
-Open **<http://127.0.0.1:8765>**. Overview, Research and Paper trading show local
-dataset history, recorded training outcomes, data-quality diagnostics and verified
-paper journals. Refresh runs automatically every 30 seconds. Failed reads retain
-the last snapshot and label it stale. The dashboard binds to your computer only,
-keeps credentials on the server, and has no order or activation controls.
+Open <http://127.0.0.1:8765>. The dashboard binds to loopback, is read-only, never
+reads reserved final-test prices and has no order or activation controls. A fresh
+clone shows empty states until local data and experiments exist.
 
-Market history displays the last reported trade from each development session;
-it is not a strategy profit chart. Reserved final-test prices are never read by
-the dashboard. Empty results stay empty until actual evidence exists. See
-[frontend setup](frontend/README.md) for development commands.
-
-## Get free stock data
-
-Create an Alpaca paper account yourself and provide market-data credentials in
-local environment variables. Keep keys out of Git and logs:
+## Research workflow
 
 ```bash
-export ALPACA_API_KEY='your-market-data-key'
-export ALPACA_SECRET_KEY='your-market-data-secret'
-python -m hft data-probe --symbol AAPL --session 2026-09-28
 python -m hft download --symbol AAPL --start 2026-03-01 --end 2026-09-30 --output data/aapl
-python -m hft prepare --input data/aapl/manifest.json
-```
-
-These commands only read data/calendar endpoints. No paid feed fallback exists.
-Free IEX is one exchange's feed; the software does not pretend it is consolidated
-NBBO or a Level 2 order book. The probe distinguishes holidays, empty coverage
-and denied historical access. Historical entitlement must be checked on your own
-account. Downloads paginate, checkpoint checksummed session partitions and resume
-by rerunning the same command. They preserve a 5GB disk reserve.
-
-If past quote/trade data is unavailable, collect real events locally instead:
-
-```bash
-python -m hft record --symbol AAPL --output data/recordings/aapl --duration 23400
-python -m hft prepare --input data/recordings/aapl
-```
-
-Start before the actual exchange opening and keep the computer awake. Recording
-preserves arrival timestamps. Partial sessions remain labelled partial for
-eligibility. A recording directory holds one stock. Missing history produces an
-insufficient-data report, never invented historical quotes. Calendar records
-handle holidays, DST and early closes.
-
-## Train and compare
-
-```bash
 python -m hft experiment --dataset data/aapl/manifest.json --config config/research.toml --output artifacts/aapl/experiment.json
-python -m hft data-quality --experiment artifacts/aapl/experiment.json
 python -m hft data-quality --experiment artifacts/aapl/experiment.json --all-development
 python -m hft train --experiment artifacts/aapl/experiment.json
-python -m hft train --experiment artifacts/aapl/experiment.json --resume
 python -m hft report --experiment artifacts/aapl/experiment.json
-```
-
-Edit `config/research.toml` **before freezing an experiment**, including
-`initial_cash` if your strategy allocation will differ from $500. The search
-compares three PPO configurations, two seeds and three expanding validation
-folds. It refits the selected configuration on development data and consumes the
-reserved final test once. Real final-test dates are registered in `.state/` so
-another output filename does not silently allow retuning on the same dates.
-After a failed final test, obtain later unseen sessions for another final test.
-Interrupted final evaluation may require fresh test dates; it fails conservatively.
-
-The development-only data-quality check uses the shared simulation to count
-warmup coverage and gaps. Training runs this check automatically before fitting.
-Any event gap over the runtime's five-second limit blocks the experiment; fewer
-than 61 completed bars or unverified data provenance also fail. The check stops
-at the first unusable session and records the number checked in `diagnostics.json`.
-Pass `--all-development` to inspect every development session despite ordinary
-coverage/provenance failures. Complete coverage can still be insufficient data;
-per-session reasons and eligible fractions explain the result. Integrity, loader
-memory limits and training deadlines remain enforced. Neither mode fits a model,
-reads reserved final-test prices or establishes paper eligibility. Both modes
-atomically write `diagnostics.json` beside the frozen experiment after successful
-traversal; exceptions preserve the previous report. A later default preflight can
-replace a full report with a correctly labelled prefix.
-
-Each session reports numeric and metadata bytes, metadata column sizes and retained
-total using the loader's existing buffer accounting. These counts exclude Python
-object overhead, simulation timeline indices and transient copies. Process peak
-RSS is reported separately in bytes: it is the cumulative process lifetime high
-water mark, not that session's allocation. Full inspection releases each session
-before loading the next. Setup, preflight and fitting all count toward the cumulative
-training time budget. Resuming a completed final report preserves it.
-
-The current local MCD dataset has 82 real IEX sessions, with 52 development and
-30 reserved final-test sessions. Full inspection of
-`artifacts/mcd-v3/experiment.json` found gaps in all 52 development sessions:
-2,054 eligible and 238,106 ineligible decisions (0.855% eligible), 57,049 gaps.
-Diagnostic peak RSS was 295.16 MiB; no model was fitted or qualified. Training
-remains blocked before fitting. See [measured results and next project](docs/research-readiness-results.md)
-for identities, memory details and limitations. Extra training cannot fix missing
-market coverage.
-
-Reports include cash, risk-matched intraday long, EMA 5/20, twenty random controls,
-transaction costs, completed flat-to-flat trades, quote-level drawdown, stress
-execution and a corrected paired block bootstrap. A separate full-stock return
-is context rather than a risk-matched control. Failure to match actual random
-execution frequency prevents eligibility. Too little history is an explicit
-`insufficient-data` result. Passing engineering tests does not establish an edge.
-
-The resulting `artifacts/aapl/search/bundle/` contains `model.onnx` and a hashed
-manifest with the feature, execution, dataset and research contracts. Old single
-ONNX files and the previous three-action schema are rejected.
-Feature-v2 bundles and older frozen experiments are also incompatible with the
-current feature-v3 and causal boundary-timer contract. Freeze a new experiment
-and retrain; do not relabel an old model or delete final-test reservations.
-
-## Replay and dry runs
-
-```bash
 python -m hft replay --model artifacts/aapl/search/bundle --dataset data/aapl/manifest.json
-python -m hft dry-run --model artifacts/aapl/search/bundle --duration 3600
-python -m hft status --logs logs --state .state
 ```
 
-Replay and dry-run use the same long-only fractional sizing, ledger, features,
-risk gateway and displayed-liquidity execution simulator as training. Fills need
-a genuine eligible future quote after 75ms latency; they cannot use a bar close or
-invent liquidity. Defaults allocate 10% of session-start strategy equity, reserve
-fees, cap maintenance exposure at 15%, enforce daily loss at 1% and persistent
-peak drawdown at 5%, and limit entries to five per minute. Repeated long signals
-hold the existing quantity. The strategy can grow its allocation with earnings
-within its frozen hard notional ceiling.
+Downloading uses free IEX data through your own Alpaca market-data credentials
+(read-only endpoints). The [operations guide](docs/operations.md) covers data
+acquisition and recording, experiment freezing, training budgets, diagnostics,
+replay, dry runs, broker paper trading, graduation and live activation.
 
-The last minute of the actual session is reserved for closing. Warmup requires
-61 completed bars each session. Stale/future quotes, excessive volatility, sleep,
-backlogs and unresolved orders prevent entries. A stop without a subsequent
-executable local quote records remaining inventory; it cannot fabricate a fill.
-Local account and risk state survives restart. Simulated outstanding orders are
-cancelled on restart; broker orders are reconciled.
+## Documentation
 
-Replay publishes bars at causal five-second timer boundaries. Training and
-runtime keep the same bounded 61-bar history and reset warmup on feed gaps.
-Truncated training episodes use genuine subsequent quotes for bounded liquidation;
-unresolved positions block reset rather than disappearing. Incomplete normal,
-stress or primary-control rollouts cannot qualify. Historical data without arrival
-timestamps still cannot establish actual network latency, and boundary-timer
-replay idealizes the streaming loop's polling delay.
+- [Operations guide](docs/operations.md): commands and operating contracts.
+- [Trading specification](docs/trading-spec.md): execution, risk, research and graduation contracts.
+- [Architecture](docs/architecture.md) and [demo walkthrough](docs/demo.md).
+- [Performance results](docs/performance-results.md), [development readiness results](docs/research-readiness-results.md)
+  and [free-data suitability results](docs/free-data-suitability-results.md).
+- [Research roadmap](docs/research-improvement-roadmap.md) and [dashboard design system](DESIGN.md).
 
-## Broker paper trading and graduation
+## Limitations
 
-Broker paper trading submits real requests to the **paper endpoint only**. Use a
-dedicated account with no unrelated positions/orders, with strategy capital no
-larger than verified non-borrowed cash:
+- No model has qualified; the current development data fails continuity checks.
+  Passing engineering tests does not establish a trading edge.
+- Free IEX data is one exchange's feed, not consolidated NBBO or a full order book.
+- Historical replay cannot prove live network latency; broker fee and fractional
+  order behavior still need a real paper-account integration run.
+- Stocks only, long-only fractional positions, no leverage or shorting.
 
-```bash
-export ALPACA_PAPER_API_KEY='your-paper-trading-key'
-export ALPACA_PAPER_SECRET_KEY='your-paper-trading-secret'
-python -m hft broker-paper --model artifacts/aapl/search/bundle --capital 500
-python -m hft graduate --model artifacts/aapl/search/bundle --logs logs/broker-paper --output artifacts/aapl/graduation.json
-```
+## License
 
-Keep market-data credentials configured too; paper credentials are accepted as
-their fallback. Runtime credentials for paper and live order endpoints are
-separate. No account is created, funded or reset by this program.
-
-Quote intake uses a bounded independent task while REST order operations run
-serially in a worker thread. Trade updates provide primary notifications and REST
-polling recovers missed updates. An acknowledgement is not a fill. Client order
-IDs and pending state are durable before POST; a timeout triggers lookup using
-the same ID, never a second blind submission. A cancellation acknowledgement does
-not establish a terminal status. Fresh broker inventory permits an emergency
-market reduction when local data has failed. Unexpected positions, orders, cash,
-fees or funding changes stop trading and disqualify that session.
-
-The gate recomputes results from hash-checked journals and their executions,
-checks the frozen research result, and requires at least 30 consecutive complete
-real broker-paper sessions, 100 completed trades, positive profit/expectancy,
-profit factor >=1.3 and drawdown <5%. It replays recorded events under worse costs
-and latency, and checks the stricter live canary separately. Evidence expires
-five actual exchange sessions later. Replay, dry runs, synthetic sessions,
-incomplete coverage, changed settings and a caller-supplied `passed` value cannot
-satisfy the live constructor. Hash chains detect corruption, not a malicious
-owner rewriting the whole application or its local files.
-
-## Live activation and operations
-
-The build and tests never submit live orders. The operator must separately
-configure `ALPACA_LIVE_API_KEY` and `ALPACA_LIVE_SECRET_KEY`, provide a frozen real
-bundle, and explicitly activate the command. After passing graduation:
-
-```bash
-python -m hft live --model artifacts/aapl/search/bundle --logs logs/broker-paper --enable-live --capital 500 --max-live-notional 10
-```
-
-This path rechecks evidence and the current broker calendar before trading. The
-first live allocation is capped at $10 per entry and stops after ten completed
-live sessions for operator review. Raising the ceiling is not implemented as an
-automatic response to profits. Changing capital, feed, features, costs or risk
-settings requires a newly evaluated bundle; the only supported execution override
-is a stricter canary cap with its own replay.
-
-Use Ctrl-C for controlled shutdown. Remote shutdown cancels outstanding orders,
-waits for final fills, closes verified remaining inventory while the market is
-open, and reconciles. Unresolved shutdown returns an error and leaves durable IDs
-and truthful logs. Inspect the broker's positions/open orders before restarting.
-Do not delete `.state/` to bypass an unknown order, a drawdown latch or a failed
-reconciliation. A second process cannot own the same account by choosing a new
-log or state path.
-
-Actual broker regulatory fees not exposed on an order, external transfers and
-corporate actions currently require operator reconciliation: cash differences
-beyond one cent halt entries rather than being silently treated as trading PnL.
-Fractional limit order acceptance and fee/settlement behavior still need a real
-paper-account integration run. Broker rules and entitlements are checked through
-account/API responses; the code does not embed an obsolete universal $25,000
-intraday-trading assumption.
-
-See [the specification](docs/trading-spec.md), [implementation plan](docs/trading-implementation-plan.md)
-and [verification record](docs/progress.md) for contracts and proof. Run local
-verification with `python -m pytest -q`, `ruff check hft tests` and
-`ruff format --check hft tests`. Actual free-data access, profitable historical
-results and elapsed paper/live sessions remain external gates.
-
-Research continuation: [six-session free-data probe and loading correction](docs/free-data-suitability-results.md). NVDA passes both sampled dates; broader readiness and bounded training memory remain unproven.
+[MIT](LICENSE).

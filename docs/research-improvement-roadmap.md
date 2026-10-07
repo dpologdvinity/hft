@@ -46,7 +46,7 @@ to explicit authorization and the established evidence gates.
 | Order | Work item | Expected result | Dependency |
 | --- | --- | --- | --- |
 | 1 | ~~Close the optional export isolation gap~~ (done 2026-10-07) | Every price-loading path enforces its research phase | None |
-| 2 | Project execution metadata | Reduce retained buffers and per-event conversion work | Consumer and equivalence verification |
+| 2 | ~~Project execution metadata~~ (done 2026-10-07) | Reduce retained buffers and per-event conversion work | Consumer and equivalence verification |
 | 3 | Bound simulation ownership and preparation | Keep training memory bounded while preserving throughput | Memory measurements and phase ownership |
 | 4 | Expand declared NVDA development coverage | Establish suitability across a broader sample | A resource-bounded diagnostic workload |
 | 5 | Evaluate a simple causal baseline | Determine whether predictive information survives execution costs | Suitable development data |
@@ -73,9 +73,15 @@ Acceptance requires rejection before any unauthorized market partition is opened
 loading only the permitted sessions, and preserving explicit-observation export
 and ONNX action parity.
 
-### 2. Project Execution Metadata
+### 2. Project Execution Metadata (Completed October 7, 2026)
 
-In [data.py](../hft/data.py), `load_session` retains every nonnumeric archive
+**Resolution:** research loads now use an execution metadata view, and each
+session is preflighted once. On NVDA 2026-06-05 retained buffers fell 63%, peak
+RSS 33% and load time 10×; across the 52 MCD development sessions retained bytes
+fell 62.8%. Bars, gaps, eligibility and rollout results are identical. See
+[performance results](performance-results.md).
+
+Original proposal: in [data.py](../hft/data.py), `load_session` retains every nonnumeric archive
 column, and `iter_events` converts the retained fields into Python values for
 each event. Raw JSON and original quote-size columns have no execution consumers;
 normalized quote sizes already provide executable quantities.
@@ -170,9 +176,9 @@ not become a tuning dataset.
 
 ## Recommended Execution Sequence
 
-The export isolation correction is complete. Next, undertake a bounded memory
-project covering metadata projection, reference release, and measured preparation
-costs. Expand the declared NVDA development sample after that workload fits the
+The export isolation correction and metadata projection are complete. Next,
+bound simulation ownership: reference release and measured preparation costs,
+including the per-event conversion hotspots recorded in the performance results. Expand the declared NVDA development sample after that workload fits the
 available resources. Proceed to baseline comparison and bounded PPO experiments
 only when the data evidence supports them.
 

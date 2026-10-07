@@ -1,0 +1,50 @@
+{
+  "dataset": "data/free-data-probe-2026-10-04/nvda/manifest.json",
+  "session": "2026-06-05",
+  "metadata": "all",
+  "repeat": 1,
+  "python": "3.12.3",
+  "machine": "x86_64",
+  "cpu_count": 12,
+  "quotes": 5103471,
+  "trades": 76525,
+  "fingerprint": {
+    "bars": 4680,
+    "bars_sha": "800dbe7bb0bf0825",
+    "gaps": 0,
+    "eligible": 4619,
+    "ineligible": 0,
+    "rollout_sha": null
+  },
+  "median": {
+    "load_seconds": 4.7684629279974615,
+    "simulation_seconds": 80.94025035099912,
+    "diagnostic_seconds": 125.04889679999906,
+    "retained_bytes": 1489273044,
+    "metadata_bytes": 1283297604,
+    "rss_after_load_bytes": 1760477184,
+    "peak_rss_bytes": 3052462080
+  },
+  "runs": [
+    {
+      "quotes": 5103471,
+      "trades": 76525,
+      "retained_bytes": 1489273044,
+      "metadata_bytes": 1283297604,
+      "rss_after_load_bytes": 1760477184,
+      "peak_rss_bytes": 3052462080,
+      "load_seconds": 4.7684629279974615,
+      "simulation_seconds": 80.94025035099912,
+      "diagnostic_seconds": 125.04889679999906,
+      "rollout_seconds": null,
+      "fingerprint": {
+        "bars": 4680,
+        "bars_sha": "800dbe7bb0bf0825",
+        "gaps": 0,
+        "eligible": 4619,
+        "ineligible": 0,
+        "rollout_sha": null
+      }
+    }
+  ]
+}

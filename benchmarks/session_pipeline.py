@@ -1,7 +1,8 @@
 """Measure one session through load -> simulation -> diagnostics -> rollout.
 
 Each repetition runs in a fresh child process so peak RSS is that run's own
-high-water mark rather than an earlier run's. The child also prints a
+high-water mark rather than an earlier run's. Phases report wall-clock and
+process CPU seconds; CPU time is the steadier metric on a shared machine. The child also prints a
 fingerprint of bars, gaps, decision eligibility and the always-long rollout
 result, so two loader configurations can be checked for identical behavior.
 
@@ -34,6 +35,16 @@ def _rss_bytes():
     return pages * os.sysconf("SC_PAGE_SIZE")
 
 
+class _Timer:
+    def __enter__(self):
+        self.wall, self.cpu = time.perf_counter(), time.process_time()
+        return self
+
+    def __exit__(self, *exc):
+        self.wall = time.perf_counter() - self.wall
+        self.cpu = time.process_time() - self.cpu
+
+
 def _digest(value):
     return hashlib.sha256(repr(value).encode()).hexdigest()[:16]
 
@@ -45,35 +56,34 @@ def child(args):
     from hft.research import _rollout
 
     kwargs = {} if args.metadata == "all" else {"metadata": args.metadata}
-    start = time.perf_counter()
-    (session,) = load_dataset(args.dataset, session_ids=[args.session], **kwargs)
-    load_seconds = time.perf_counter() - start
+    timers = {}
+    with _Timer() as timers["load"]:
+        (session,) = load_dataset(args.dataset, session_ids=[args.session], **kwargs)
     rss_after_load = _rss_bytes()
 
-    start = time.perf_counter()
-    simulation = Simulation(session)
-    simulation_seconds = time.perf_counter() - start
+    with _Timer() as timers["simulation"]:
+        simulation = Simulation(session)
 
     # Same traversal as the development data-quality diagnostic.
-    start = time.perf_counter()
     eligible = ineligible = 0
-    for bar in simulation.bars[61:]:
-        if simulation.decision_eligible:
-            eligible += 1
-        else:
-            ineligible += 1
-        simulation.advance_to(bar.end_ns)
-    diagnostic_seconds = time.perf_counter() - start
+    with _Timer() as timers["diagnostic"]:
+        for bar in simulation.bars[61:]:
+            if simulation.decision_eligible:
+                eligible += 1
+            else:
+                ineligible += 1
+            simulation.advance_to(bar.end_ns)
     gaps = simulation.gap_count
     bars = simulation.bars
     del simulation
 
     rollout = {}
-    rollout_seconds = None
     if args.rollout:
-        start = time.perf_counter()
-        rollout, _ = _rollout([session], lambda obs, env: 1)
-        rollout_seconds = time.perf_counter() - start
+        with _Timer() as timers["rollout"]:
+            rollout, _ = _rollout([session], lambda obs, env: 1)
+    phases = ("load", "simulation", "diagnostic", "rollout")
+    seconds = {f"{p}_seconds": timers[p].wall if p in timers else None for p in phases}
+    cpu = {f"{p}_cpu_seconds": timers[p].cpu if p in timers else None for p in phases}
 
     print(
         json.dumps(
@@ -85,10 +95,8 @@ def child(args):
                 "rss_after_load_bytes": rss_after_load,
                 # Linux ru_maxrss is KiB.
                 "peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
-                "load_seconds": load_seconds,
-                "simulation_seconds": simulation_seconds,
-                "diagnostic_seconds": diagnostic_seconds,
-                "rollout_seconds": rollout_seconds,
+                **seconds,
+                **cpu,
                 "fingerprint": {
                     "bars": len(bars),
                     "bars_sha": _digest(bars),
@@ -135,7 +143,11 @@ def main():
         runs.append(json.loads(output.strip().splitlines()[-1]))
     if len({json.dumps(r["fingerprint"], sort_keys=True) for r in runs}) != 1:
         raise SystemExit("nondeterministic fingerprint across repetitions")
-    timed = ("load_seconds", "simulation_seconds", "diagnostic_seconds", "rollout_seconds")
+    timed = tuple(
+        f"{phase}_{unit}"
+        for phase in ("load", "simulation", "diagnostic", "rollout")
+        for unit in ("seconds", "cpu_seconds")
+    )
     sized = ("retained_bytes", "metadata_bytes", "rss_after_load_bytes", "peak_rss_bytes")
     summary = {
         "dataset": args.dataset,
@@ -145,6 +157,7 @@ def main():
         "python": platform.python_version(),
         "machine": platform.machine(),
         "cpu_count": os.cpu_count(),
+        "load_average_at_end": os.getloadavg(),
         "quotes": runs[0]["quotes"],
         "trades": runs[0]["trades"],
         "fingerprint": runs[0]["fingerprint"],

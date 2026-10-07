@@ -1,0 +1,91 @@
+{
+  "dataset": "data/mcd/manifest.json",
+  "session": "2026-06-04",
+  "metadata": "all",
+  "repeat": 3,
+  "python": "3.12.3",
+  "machine": "x86_64",
+  "cpu_count": 12,
+  "quotes": 59084,
+  "trades": 3541,
+  "fingerprint": {
+    "bars": 4680,
+    "bars_sha": "adf9f6f112d55e2f",
+    "gaps": 936,
+    "eligible": 42,
+    "ineligible": 4577,
+    "rollout_sha": "371c54810a0063c6"
+  },
+  "median": {
+    "load_seconds": 0.39841614999750163,
+    "simulation_seconds": 0.8002693620001082,
+    "diagnostic_seconds": 1.204839787002129,
+    "rollout_seconds": 2.7296252689993707,
+    "retained_bytes": 17567325,
+    "metadata_bytes": 15118981,
+    "rss_after_load_bytes": 143052800,
+    "peak_rss_bytes": 159997952
+  },
+  "runs": [
+    {
+      "quotes": 59084,
+      "trades": 3541,
+      "retained_bytes": 17567325,
+      "metadata_bytes": 15118981,
+      "rss_after_load_bytes": 141864960,
+      "peak_rss_bytes": 157810688,
+      "load_seconds": 0.388567720001447,
+      "simulation_seconds": 0.7699641459985287,
+      "diagnostic_seconds": 1.0978833340050187,
+      "rollout_seconds": 2.0717966459997115,
+      "fingerprint": {
+        "bars": 4680,
+        "bars_sha": "adf9f6f112d55e2f",
+        "gaps": 936,
+        "eligible": 42,
+        "ineligible": 4577,
+        "rollout_sha": "371c54810a0063c6"
+      }
+    },
+    {
+      "quotes": 59084,
+      "trades": 3541,
+      "retained_bytes": 17567325,
+      "metadata_bytes": 15118981,
+      "rss_after_load_bytes": 143052800,
+      "peak_rss_bytes": 159997952,
+      "load_seconds": 0.39841614999750163,
+      "simulation_seconds": 0.8002693620001082,
+      "diagnostic_seconds": 1.204839787002129,
+      "rollout_seconds": 2.7296252689993707,
+      "fingerprint": {
+        "bars": 4680,
+        "bars_sha": "adf9f6f112d55e2f",
+        "gaps": 936,
+        "eligible": 42,
+        "ineligible": 4577,
+        "rollout_sha": "371c54810a0063c6"
+      }
+    },
+    {
+      "quotes": 59084,
+      "trades": 3541,
+      "retained_bytes": 17567325,
+      "metadata_bytes": 15118981,
+      "rss_after_load_bytes": 143458304,
+      "peak_rss_bytes": 160083968,
+      "load_seconds": 1.3974200650045532,
+      "simulation_seconds": 1.0267599489961867,
+      "diagnostic_seconds": 1.6309590129967546,
+      "rollout_seconds": 2.8722494230023585,
+      "fingerprint": {
+        "bars": 4680,
+        "bars_sha": "adf9f6f112d55e2f",
+        "gaps": 936,
+        "eligible": 42,
+        "ineligible": 4577,
+        "rollout_sha": "371c54810a0063c6"
+      }
+    }
+  ]
+}

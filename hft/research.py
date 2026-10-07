@@ -182,7 +182,13 @@ def load_phase_sessions(experiment, phase, *, resident_bytes=0):
     source = Path(experiment["dataset_manifest"])
     if checksum(source) != experiment["dataset_hash"]:
         raise ValueError("dataset identity changed")
-    sessions = load_dataset(source, session_ids=experiment[phase], resident_bytes=resident_bytes)
+    # Research only simulates; archive-only metadata stays on disk.
+    sessions = load_dataset(
+        source,
+        session_ids=experiment[phase],
+        resident_bytes=resident_bytes,
+        metadata="execution",
+    )
     if [s.session_id for s in sessions] != experiment[phase]:
         raise ValueError("research phase session order changed")
     for session in sessions:
@@ -239,7 +245,7 @@ def preflight_experiment(path, *, deadline=float("inf"), inspect_all=False):
             raise ValueError("session manifest escapes dataset")
         if checksum(target) != entry["sha256"]:
             raise ValueError("session manifest checksum mismatch")
-        session = load_session(target)
+        session = load_session(target, metadata="execution")
         if (
             session.session_id != date
             or _session_manifest_hash(session.manifest) != manifest["session_hashes"][date]
@@ -282,6 +288,8 @@ def preflight_experiment(path, *, deadline=float("inf"), inspect_all=False):
             "metadata_bytes": metadata,
             "retained_bytes": retained,
             "metadata_columns_bytes": metadata_column_bytes(session.manifest),
+            # Byte counts cover the loaded execution view, not every archived column.
+            "metadata_projection": session.metadata_projection,
             # Linux ru_maxrss is KiB; this is a process lifetime peak, not a session allocation.
             "process_peak_rss_bytes": int(
                 resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024

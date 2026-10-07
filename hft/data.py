@@ -27,6 +27,16 @@ MAX_WORKING_BYTES = 8 * 1024**3
 # Rows per metadata sizing batch: bounds the transient scan while keeping per-batch
 # overhead small (64-row batches made the scan ~95% of a 5M-quote session's load).
 PREFLIGHT_BATCH_ROWS = 8192
+# Metadata the simulation reads: identities for de-duplication and quote matching,
+# arrival times for causal ordering, and trade conditions/tape for bar filtering.
+# Raw JSON, raw sizes and exchange codes stay in the Parquet archive.
+EXECUTION_METADATA = {
+    "quotes": ("i", "quote_id", "arrival_ns"),
+    "trades": ("i", "trade_id", "c", "z", "arrival_ns"),
+}
+# Hashed into a quote identity only when a quote lacks a truthy quote_id/i.
+QUOTE_IDENTITY_FALLBACK = ("bx", "ax", "c", "z")
+METADATA_PROJECTIONS = ("all", "execution")
 NUMERIC_NAMES = (
     "quote_ns",
     "bid",
@@ -179,6 +189,8 @@ class SessionData:
     trade_price: np.ndarray
     trade_size: np.ndarray
     manifest: dict
+    # "execution" sessions omit archive-only metadata and must not be re-saved.
+    metadata_projection: str = "all"
 
     def __post_init__(self):
         if not self.symbol or self.open_ns <= 0 or self.close_ns <= self.open_ns:
@@ -385,6 +397,8 @@ def save_dataset(sessions, path) -> Path:
     root = manifest_path.parent
     entries = []
     for s in sessions:
+        if s.metadata_projection != "all":
+            raise ValueError("cannot save a session loaded with projected metadata")
         directory = root / s.symbol / s.session_id
         directory.mkdir(parents=True, exist_ok=True)
         parts = {}
@@ -469,12 +483,41 @@ def session_bytes(session):
     )
 
 
-def _session_preflight(path, resident_bytes=0):
+def _has_complete_quote_identities(file):
+    """True when every quote has a non-empty string quote_id or i."""
+    names = [name for name in ("quote_id", "i") if name in file.schema_arrow.names]
+    if not names or not all(pa.types.is_string(file.schema_arrow.field(n).type) for n in names):
+        return False
+    for batch in file.iter_batches(batch_size=PREFLIGHT_BATCH_ROWS, columns=names):
+        present = None
+        for name in names:
+            truthy = pc.fill_null(pc.greater(pc.utf8_length(batch.column(name)), 0), False)
+            present = truthy if present is None else pc.or_(present, truthy)
+        if len(batch) and not pc.all(present).as_py():
+            return False
+    return True
+
+
+def _metadata_columns(file, names, kind, metadata):
+    extra = [name for name in file.schema_arrow.names if name not in names]
+    if metadata == "all":
+        return extra
+    keep = set(EXECUTION_METADATA[kind])
+    if kind == "quotes" and not _has_complete_quote_identities(file):
+        keep.update(QUOTE_IDENTITY_FALLBACK)
+    return [name for name in extra if name in keep]
+
+
+def _session_preflight(path, resident_bytes=0, metadata="all"):
+    """Verify partitions and budget memory; return the metadata columns to load."""
+    if metadata not in METADATA_PROJECTIONS:
+        raise ValueError(f"unknown metadata projection {metadata!r}")
     path = Path(path)
     m = json.loads(path.read_text())
     if m.get("status") != "complete":
         raise ValueError("incomplete session")
-    numeric = metadata = 0
+    numeric = metadata_size = 0
+    columns = {}
     # Include model, prepared simulation and Python allocations. Linux peak RSS
     # is conservative after releases, but never understates the existing process.
     working_baseline = max(
@@ -503,29 +546,30 @@ def _session_preflight(path, resident_bytes=0):
             raise ValueError("session exceeds memory budget")
         # Scan only metadata in bounded Arrow batches before numeric allocation.
         # Encoded Parquet byte sizes alone undercount dictionary-expanded raw JSON.
-        extra = [name for name in file.schema_arrow.names if name not in names]
+        extra = columns[kind] = _metadata_columns(file, names, kind, metadata)
         for batch in file.iter_batches(batch_size=PREFLIGHT_BATCH_ROWS, columns=extra):
-            metadata += batch.nbytes
-            retained = numeric + metadata
+            metadata_size += batch.nbytes
+            retained = numeric + metadata_size
             if retained > MAX_SESSION_BYTES or resident_bytes + retained > MAX_DATASET_BYTES:
                 raise ValueError("dataset/session exceeds resident memory budget")
         # Preallocated arrays coexist with their immutable defensive copies.
-        if working_baseline + 2 * numeric + metadata > MAX_WORKING_BYTES:
+        if working_baseline + 2 * numeric + metadata_size > MAX_WORKING_BYTES:
             raise ValueError("dataset load exceeds working memory budget")
-    retained = numeric + metadata
+    retained = numeric + metadata_size
     if resident_bytes + retained > MAX_DATASET_BYTES:
         raise ValueError("dataset exceeds resident memory budget; load individual sessions")
-    return retained
+    return columns
 
 
-def load_session(manifest_path: Path, *, resident_bytes=0) -> SessionData:
+def load_session(manifest_path: Path, *, resident_bytes=0, metadata="all") -> SessionData:
+    """Load one session. metadata="execution" keeps only what simulation reads."""
     path = Path(manifest_path)
-    _session_preflight(path, resident_bytes)
-    return _read_session(path)
+    columns = _session_preflight(path, resident_bytes, metadata)
+    return _read_session(path, columns, metadata)
 
 
-def _read_session(path: Path) -> SessionData:
-    """Read partitions that `_session_preflight` has already budgeted."""
+def _read_session(path: Path, columns, metadata) -> SessionData:
+    """Read the metadata columns that `_session_preflight` has already budgeted."""
     m = json.loads(path.read_text())
     if m.get("status") != "complete":
         raise ValueError("incomplete session")
@@ -547,9 +591,9 @@ def _read_session(path: Path) -> SessionData:
             raise ValueError("session exceeds memory budget")
         for name in names:
             arrays[name] = np.empty(rows, dtype=np.int64 if name.endswith("_ns") else np.float64)
-        extra = {name: [] for name in file.schema_arrow.names if name not in names}
+        extra = {name: [] for name in columns[kind]}
         offset = 0
-        for batch in file.iter_batches(batch_size=65_536):
+        for batch in file.iter_batches(batch_size=65_536, columns=[*names, *extra]):
             n = len(batch)
             for name in names:
                 col = batch.column(batch.schema.get_field_index(name))
@@ -567,7 +611,13 @@ def _read_session(path: Path) -> SessionData:
             }
     m.update(meta)
     return SessionData(
-        m["symbol"], m["session_id"], m["open_ns"], m["close_ns"], manifest=m, **arrays
+        m["symbol"],
+        m["session_id"],
+        m["open_ns"],
+        m["close_ns"],
+        manifest=m,
+        metadata_projection=metadata,
+        **arrays,
     )
 
 
@@ -610,7 +660,7 @@ def load_dataset_manifests(path) -> list[tuple[Path, dict]]:
     return result
 
 
-def load_dataset(path, *, session_ids=None, resident_bytes=0) -> list[SessionData]:
+def load_dataset(path, *, session_ids=None, resident_bytes=0, metadata="all") -> list[SessionData]:
     manifests = load_dataset_manifests(path)
     if session_ids is not None:
         ids = list(session_ids)
@@ -622,8 +672,8 @@ def load_dataset(path, *, session_ids=None, resident_bytes=0) -> list[SessionDat
     result = []
     resident = resident_bytes
     for target, _ in manifests:
-        _session_preflight(target, resident)
-        session = _read_session(target)
+        columns = _session_preflight(target, resident, metadata)
+        session = _read_session(target, columns, metadata)
         result.append(session)
         resident += session_bytes(session)
     return result

@@ -26,9 +26,13 @@ def frozen(root, *, gap=False, bars=100, provenance="alpaca-historical-iex", met
 
         for session in sessions:
             session.manifest["quote_metadata"] = {
-                "raw_json": pa.array(['{"source":"fixture"}'] * len(session.quote_ns))
+                "raw_json": pa.array(['{"source":"fixture"}'] * len(session.quote_ns)),
+                "i": pa.array([f"q{k}" for k in range(len(session.quote_ns))]),
             }
-            session.manifest["trade_metadata"] = {"flags": [1] * len(session.trade_ns)}
+            session.manifest["trade_metadata"] = {
+                "flags": [1] * len(session.trade_ns),
+                "i": pa.array([f"t{k}" for k in range(len(session.trade_ns))]),
+            }
     for session in sessions:
         session.manifest.update(synthetic=False, feed="iex", provenance=provenance)
     source = save_dataset(sessions, root / "data")
@@ -384,6 +388,8 @@ def test_quality_reports_memory_without_changing_events(tmp_path, monkeypatch, g
             assert isinstance(memory[key], int) and memory[key] >= 0
         assert memory["numeric_bytes"] == expected_numeric
         assert memory["metadata_bytes"] > 0
+        assert memory["metadata_projection"] == "execution"
+        assert set(memory["metadata_columns_bytes"]["quote_metadata"]) == {"i"}
         assert memory["metadata_bytes"] == sum(
             sum(columns.values()) for columns in memory["metadata_columns_bytes"].values()
         )

@@ -12,6 +12,16 @@ def archive(root, days=80):
     return data.save_dataset(data.synthetic_sessions(days, 1), root / "data")
 
 
+def forbid_partition_reads(monkeypatch, message="prices opened"):
+    """Fail if any loader stage checksums, scans or reads a market partition."""
+
+    def fail(*args, **kwargs):
+        pytest.fail(message)
+
+    for name in ("load_session", "_session_preflight", "_read_session"):
+        monkeypatch.setattr(data, name, fail)
+
+
 def test_freeze_never_opens_market_partitions(tmp_path, monkeypatch):
     source = archive(tmp_path)
     original = Path.open
@@ -43,16 +53,17 @@ def test_search_setup_loads_only_development_prices(tmp_path, monkeypatch):
     from test_quality import frozen
 
     path, _ = frozen(tmp_path, bars=80)
-    original = data.load_session
+    original = data._session_preflight
     loaded = []
     allowed = json.loads(path.read_text())["development"]
 
-    def development_only(target, **kwargs):
-        assert target.parent.name in allowed, "setup opened final-test prices"
-        loaded.append(target.parent.name)
-        return original(target, **kwargs)
+    # The preflight is the first stage to open a partition (checksum and scan).
+    def development_only(target, *args, **kwargs):
+        assert Path(target).parent.name in allowed, "setup opened final-test prices"
+        loaded.append(Path(target).parent.name)
+        return original(target, *args, **kwargs)
 
-    monkeypatch.setattr(data, "load_session", development_only)
+    monkeypatch.setattr(data, "_session_preflight", development_only)
 
     def search(sessions, manifest, *args, **kwargs):
         assert [s.session_id for s in sessions] == allowed
@@ -144,7 +155,7 @@ def test_final_prices_open_only_after_durable_reservation(tmp_path, monkeypatch)
 def test_phase_loader_rejects_unreserved_final_without_price_reads(tmp_path, monkeypatch):
     source = archive(tmp_path)
     experiment = research.freeze_experiment(source, {}, tmp_path / "experiment.json")
-    monkeypatch.setattr(data, "load_session", lambda *args, **kwargs: pytest.fail("prices opened"))
+    forbid_partition_reads(monkeypatch)
     with pytest.raises(ValueError, match="reserved"):
         research.load_phase_sessions(experiment, "final_test")
 
@@ -154,7 +165,7 @@ def test_selection_rejects_unknown_or_duplicate_dates_before_price_reads(
     tmp_path, monkeypatch, ids
 ):
     source = archive(tmp_path, 2)
-    monkeypatch.setattr(data, "load_session", lambda *args, **kwargs: pytest.fail("prices opened"))
+    forbid_partition_reads(monkeypatch)
     with pytest.raises(ValueError, match="selection"):
         data.load_dataset(source, session_ids=ids)
 
@@ -188,7 +199,7 @@ def test_freeze_rejects_invalid_archive_metadata_without_reading_prices(
     else:
         index["status"] = "partial"
     data.atomic_json(source, index)
-    monkeypatch.setattr(data, "load_session", lambda *args, **kwargs: pytest.fail("prices opened"))
+    forbid_partition_reads(monkeypatch)
     output = tmp_path / "experiment.json"
     with pytest.raises(ValueError):
         research.freeze_experiment(source, {}, output)
@@ -212,7 +223,7 @@ def test_phase_rejects_changed_dataset_identity_without_reading_prices(tmp_path,
     source = archive(tmp_path, 3)
     frozen = research.freeze_experiment(source, {}, tmp_path / "experiment.json")
     source.write_text(source.read_text() + "\n")
-    monkeypatch.setattr(data, "load_session", lambda *args, **kwargs: pytest.fail("prices opened"))
+    forbid_partition_reads(monkeypatch)
     with pytest.raises(ValueError, match="dataset identity"):
         research.load_phase_sessions(frozen, "development")
 
@@ -221,9 +232,7 @@ def test_phase_rejects_overlap_before_opening_final_prices(tmp_path, monkeypatch
     source = archive(tmp_path)
     frozen = research.freeze_experiment(source, {}, tmp_path / "experiment.json")
     frozen["development"] = frozen["final_test"][:1]
-    monkeypatch.setattr(
-        data, "load_session", lambda *args, **kwargs: pytest.fail("final prices opened")
-    )
+    forbid_partition_reads(monkeypatch, "final prices opened")
     with pytest.raises(ValueError, match="development partition"):
         research.load_phase_sessions(frozen, "development")
 
@@ -248,8 +257,9 @@ def test_loading_includes_existing_process_memory_before_allocating(tmp_path, mo
 
     source = archive(tmp_path, 1)
     monkeypatch.setattr(resource, "getrusage", lambda _: SimpleNamespace(ru_maxrss=8 * 1024 * 1024))
+    # The budget check itself must run; reading partitions into memory must not.
     monkeypatch.setattr(
-        data, "load_session", lambda *args, **kwargs: pytest.fail("allocation began")
+        data, "_read_session", lambda *args, **kwargs: pytest.fail("allocation began")
     )
     with pytest.raises(ValueError, match="working memory budget"):
         data.load_dataset(source)

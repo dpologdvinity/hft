@@ -60,7 +60,18 @@ def _export(model, path, samples):
         raise ValueError("ONNX action parity failed")
 
 
-def export_bundle(checkpoint, experiment, output, *, observations=None):
+def export_bundle(checkpoint, experiment, output, *, observations):
+    # Callers supply observations from an authorized evaluation; export never loads
+    # the archive itself, so it cannot open reserved final-test prices.
+    samples = np.asarray(observations)
+    if (
+        samples.dtype != np.float32
+        or samples.ndim != 2
+        or samples.shape[1] != len(FEATURE_NAMES)
+        or not len(samples)
+        or not np.isfinite(samples).all()
+    ):
+        raise ValueError("export requires actual finite float32 observations")
     from stable_baselines3 import PPO
 
     from .risk import RiskConfig
@@ -81,30 +92,6 @@ def export_bundle(checkpoint, experiment, output, *, observations=None):
         experiment = json.loads(Path(experiment).read_text())
     if model.action_space.n != 2:
         raise ValueError("incompatible two-action model contract")
-    if observations is None:
-        from .data import load_dataset
-        from .research import _rollout
-
-        if not experiment.get("dataset_manifest") or not experiment.get("final_test"):
-            raise ValueError("export needs held-out actual observations or frozen dataset manifest")
-        held_out = set(experiment["final_test"])
-        sessions = [
-            s for s in load_dataset(experiment["dataset_manifest"]) if s.session_id in held_out
-        ]
-        _, observations = _rollout(
-            sessions,
-            lambda obs, env: int(model.predict(obs, deterministic=True)[0]),
-            initial_cash=experiment.get("config", {}).get("initial_cash", 500),
-        )
-    samples = np.asarray(observations)
-    if (
-        samples.dtype != np.float32
-        or samples.ndim != 2
-        or samples.shape[1] != len(FEATURE_NAMES)
-        or not len(samples)
-        or not np.isfinite(samples).all()
-    ):
-        raise ValueError("export requires actual finite float32 observations")
     real_count = len(samples)
     # State boundaries and finite fuzz augment actual held-out observations.
     fuzz = np.random.default_rng(4).normal(size=(32, len(FEATURE_NAMES))).astype(np.float32)

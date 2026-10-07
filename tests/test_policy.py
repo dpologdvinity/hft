@@ -71,6 +71,27 @@ def test_real_observation_onnx_bundle_and_tamper(tmp_path):
         OnnxPolicy(bundle)
 
 
+def test_export_requires_explicit_observations_before_reading_anything(tmp_path, monkeypatch):
+    loaded = []
+    monkeypatch.setattr("hft.data.load_dataset", lambda *a, **kw: loaded.append(a) or [])
+    monkeypatch.setattr("hft.research._rollout", lambda *a, **kw: loaded.append(a) or (0, []))
+    # A frozen manifest naming final-test sessions must never be opened by export.
+    experiment = {
+        "symbol": "SYNTH",
+        "dataset_manifest": str(tmp_path / "manifest.json"),
+        "final_test": ["2026-01-02"],
+    }
+    checkpoint = tmp_path / "missing-checkpoint.zip"
+    bundle = tmp_path / "bundle"
+    with pytest.raises(TypeError, match="observations"):
+        export_bundle(checkpoint, experiment, bundle)
+    for observations in (None, [], np.zeros((1, 3), dtype=np.float32)):
+        with pytest.raises(ValueError, match="observations"):
+            export_bundle(checkpoint, experiment, bundle, observations=observations)
+    assert loaded == []
+    assert not bundle.exists()
+
+
 @pytest.mark.parametrize(
     "section,values",
     [

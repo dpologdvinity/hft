@@ -28,7 +28,8 @@ selected according to its ability to resolve a demonstrated research limitation.
   accounts for 86.17% of those buffers, including approximately 674 MiB of raw
   JSON. The metadata percentage is not an estimate of removable memory.
 - Experiment freezing and ordinary search setup now respect phase isolation.
-  A separate optional model-export fallback still requires correction.
+  The optional model-export observation fallback was removed on October 7, 2026;
+  export now requires caller-supplied observations.
 - The modern ONNX exporter passes the six policy tests without warnings.
 
 Measurements and limitations are recorded in
@@ -44,16 +45,22 @@ to explicit authorization and the established evidence gates.
 
 | Order | Work item | Expected result | Dependency |
 | --- | --- | --- | --- |
-| 1 | Close the optional export isolation gap | Every price-loading path enforces its research phase | None |
+| 1 | ~~Close the optional export isolation gap~~ (done 2026-10-07) | Every price-loading path enforces its research phase | None |
 | 2 | Project execution metadata | Reduce retained buffers and per-event conversion work | Consumer and equivalence verification |
 | 3 | Bound simulation ownership and preparation | Keep training memory bounded while preserving throughput | Memory measurements and phase ownership |
 | 4 | Expand declared NVDA development coverage | Establish suitability across a broader sample | A resource-bounded diagnostic workload |
 | 5 | Evaluate a simple causal baseline | Determine whether predictive information survives execution costs | Suitable development data |
 | 6 | Resume interrupted final evaluation safely | Recover the identical selected evaluation without reopening selection | Separate persistence and recovery design |
 
-### 1. Close the Optional Export Isolation Gap
+### 1. Close the Optional Export Isolation Gap (Completed October 7, 2026)
 
-In [policy.py](../hft/policy.py), `export_bundle` can generate observations when
+**Resolution:** the fallback had no callers, so it was removed. `observations` is
+now a required keyword argument, validated before the checkpoint or any data is
+read. A regression in `tests/test_policy.py` proves omitted, empty, or malformed
+observations are rejected without calling the dataset loader or rollout, and the
+explicit-observation ONNX parity test still passes.
+
+Original finding: in [policy.py](../hft/policy.py), `export_bundle` can generate observations when
 none are supplied. That fallback loads the entire dataset before selecting
 final-test sessions and does not check reservation state. Ordinary search passes
 observations explicitly and therefore does not use this branch.
@@ -163,7 +170,7 @@ not become a tuning dataset.
 
 ## Recommended Execution Sequence
 
-Complete the export isolation correction first. Then undertake a bounded memory
+The export isolation correction is complete. Next, undertake a bounded memory
 project covering metadata projection, reference release, and measured preparation
 costs. Expand the declared NVDA development sample after that workload fits the
 available resources. Proceed to baseline comparison and bounded PPO experiments

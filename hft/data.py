@@ -24,6 +24,9 @@ AGGREGATION_VERSION = "causal-5s-v3-boundary-timers-latest-quote-250ms"
 MAX_SESSION_BYTES = 2 * 1024**3
 MAX_DATASET_BYTES = 6 * 1024**3
 MAX_WORKING_BYTES = 8 * 1024**3
+# Rows per metadata sizing batch: bounds the transient scan while keeping per-batch
+# overhead small (64-row batches made the scan ~95% of a 5M-quote session's load).
+PREFLIGHT_BATCH_ROWS = 8192
 NUMERIC_NAMES = (
     "quote_ns",
     "bid",
@@ -501,7 +504,7 @@ def _session_preflight(path, resident_bytes=0):
         # Scan only metadata in bounded Arrow batches before numeric allocation.
         # Encoded Parquet byte sizes alone undercount dictionary-expanded raw JSON.
         extra = [name for name in file.schema_arrow.names if name not in names]
-        for batch in file.iter_batches(batch_size=64, columns=extra):
+        for batch in file.iter_batches(batch_size=PREFLIGHT_BATCH_ROWS, columns=extra):
             metadata += batch.nbytes
             retained = numeric + metadata
             if retained > MAX_SESSION_BYTES or resident_bytes + retained > MAX_DATASET_BYTES:
@@ -518,6 +521,11 @@ def _session_preflight(path, resident_bytes=0):
 def load_session(manifest_path: Path, *, resident_bytes=0) -> SessionData:
     path = Path(manifest_path)
     _session_preflight(path, resident_bytes)
+    return _read_session(path)
+
+
+def _read_session(path: Path) -> SessionData:
+    """Read partitions that `_session_preflight` has already budgeted."""
     m = json.loads(path.read_text())
     if m.get("status") != "complete":
         raise ValueError("incomplete session")
@@ -615,7 +623,7 @@ def load_dataset(path, *, session_ids=None, resident_bytes=0) -> list[SessionDat
     resident = resident_bytes
     for target, _ in manifests:
         _session_preflight(target, resident)
-        session = load_session(target, resident_bytes=resident)
+        session = _read_session(target)
         result.append(session)
         resident += session_bytes(session)
     return result

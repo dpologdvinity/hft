@@ -1,5 +1,6 @@
 import itertools
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -115,16 +116,32 @@ def test_arrow_metadata_budget_preflight_precedes_session_load(tmp_path, monkeyp
     path = save_dataset(sessions, tmp_path)
     monkeypatch.setattr(data, "MAX_DATASET_BYTES", 300_000)
     calls = []
-    original = data.load_session
+    original = data._read_session
 
     def tracked(*args, **kwargs):
         calls.append(args[0])
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(data, "load_session", tracked)
+    monkeypatch.setattr(data, "_read_session", tracked)
     with pytest.raises(ValueError, match="memory budget"):
         data.load_dataset(path)
     assert len(calls) <= 1
+
+
+def test_load_dataset_preflights_each_session_once(tmp_path, monkeypatch):
+    from hft import data
+
+    path = save_dataset(synthetic_sessions(3, 1), tmp_path)
+    calls = []
+    original = data._session_preflight
+
+    def tracked(target, *args, **kwargs):
+        calls.append(Path(target).parent.name)
+        return original(target, *args, **kwargs)
+
+    monkeypatch.setattr(data, "_session_preflight", tracked)
+    sessions = data.load_dataset(path)
+    assert calls == [s.session_id for s in sessions]
 
 
 def test_immutable_constructor_metadata_budget_before_copy(monkeypatch):

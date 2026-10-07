@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "provenance": "Actual read-only production dashboard; no mocked responses during capture.",
+  "source": {
+    "experiment": "artifacts/mcd-v3/experiment.json",
+    "experiment_hash": "ad1a09f1d8a1bd60ce1f3b3928dcf5f2600f2267be975848e67d8afff1d5cfc4",
+    "experiment_file_sha256": "a573b14e9287fe7106101c145317f8356fb991a88232d3fec9c6ed3412248e86",
+    "diagnostics": "artifacts/mcd-v3/diagnostics.json",
+    "diagnostics_sha256": "de38fb24ee3e0927a91594ae8500f89824d4de476682e941f924481a4c73fe29",
+    "symbol": "MCD",
+    "feed": "iex",
+    "sessions": 82,
+    "development_sessions": 52,
+    "final_sessions": 30,
+    "final_test_consumed": false,
+    "eligible_decisions": 2054,
+    "ineligible_decisions": 238106,
+    "feed_gaps": 57049
+  },
+  "captures": [
+    {
+      "file": "dashboard-overview.png",
+      "view": "Overview",
+      "viewport": [
+        1440,
+        1000
+      ],
+      "full_page": false,
+      "image_dimensions": [
+        1440,
+        1000
+      ],
+      "captured_at_utc": "2026-10-07T19:33:05.886993+00:00",
+      "sha256": "a37b21e6a69ddeb346791c4d9d4601cd4d31e99079355e0464b3dd57205f59d3"
+    },
+    {
+      "file": "dashboard-research.png",
+      "view": "Research, current MCD report expanded",
+      "viewport": [
+        1440,
+        1000
+      ],
+      "full_page": true,
+      "image_dimensions": [
+        1440,
+        1549
+      ],
+      "captured_at_utc": "2026-10-07T19:33:15.035385+00:00",
+      "sha256": "26e48cd4a7a29b4c619a9ea8decfb1af13df2c4614f996a95821ffc7adb35524"
+    },
+    {
+      "file": "dashboard-paper.png",
+      "view": "Paper trading",
+      "viewport": [
+        1440,
+        1000
+      ],
+      "full_page": false,
+      "image_dimensions": [
+        1440,
+        1000
+      ],
+      "captured_at_utc": "2026-10-07T19:33:30.952018+00:00",
+      "sha256": "af1864eb1521678247e2cf12e601c02a4f83bc0e28b0db3683cabfd805594c0a"
+    },
+    {
+      "file": "dashboard-mobile.png",
+      "view": "Overview, mobile",
+      "viewport": [
+        392,
+        844
+      ],
+      "full_page": true,
+      "image_dimensions": [
+        392,
+        1774
+      ],
+      "captured_at_utc": "2026-10-07T19:33:36.578199+00:00",
+      "sha256": "d1e31bb37aa8eba85dbcdcf35468f8e9df748943c14558501c0e1faccfc5c32d"
+    }
+  ],
+  "limitations": [
+    "Source artifacts and raw market data are Git-ignored.",
+    "Screenshots are historical research evidence, not current live status or trading returns.",
+    "Architecture SVG is an authored capability diagram, not a dashboard capture."
+  ]
+}

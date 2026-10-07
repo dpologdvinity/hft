@@ -1,9 +1,9 @@
-# AI stock trader: agreed requirements and technical design
+# Trading system specification
 
 Date: 2026-10-02. Requirements and technical design for the execution, risk,
 research and graduation contracts implemented in `hft/`.
 
-## 1. What the user wants
+## 1. Goals
 
 - An AI stock trader that learns by repeatedly simulating historical markets.
 - It should improve its trading decisions to maximize profit after costs.
@@ -40,7 +40,7 @@ do not implement a second learning framework in the initial scope.
 
 Initial planning default: **long-only**, fractional shares, no borrowing and
 no leverage. The optional short-selling question is unanswered; it does not
-block implementing this stated default. If the user later chooses shorts,
+block implementing this stated default. If shorting is chosen later,
 write a separate extension plan: fractional shorting is not supported by
 the selected broker, so do not silently expand this plan to short positions.
 
@@ -68,7 +68,7 @@ validated contract. No purchased feed may be enabled automatically.
 
 Before large implementation or downloads, probe historical **trades and
 quotes**, not just minute OHLCV. Verify availability, date coverage, and
-entitlement on the user's free account. Five-second execution research needs
+entitlement on the operator's free account. Five-second execution research needs
 actual quotes and trades, not subdivided minute candles. Cache raw data by
 session, request paginated results, and cap requests at 150/minute to leave
 headroom under the currently documented 200/minute Basic limit.
@@ -217,7 +217,7 @@ Capital grows only from reconciled strategy profits or explicit deposits.
 Size new positions from session-start reconciled equity with the same 10%
 fraction; changing equity does not increase leverage or risk percentages.
 First real-money canary uses a separate $10 maximum position notional until
-ten completed live sessions and execution review; then the user can raise
+ten completed live sessions and execution review; then the operator can raise
 the absolute ceiling. The $500–$5,000 is capital, not an instruction to
 expose all of it at once. Fractional-share sizing must work at both endpoints.
 

@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1040" viewBox="0 0 1200 1040" role="img" aria-labelledby="title description">
+  <title id="title">HFT intraday research platform architecture</title>
+  <desc id="description">Checked stock-market archives and frozen experiments support a shared causal core. Development diagnostics gate PPO research and reserved final evaluation. Verified ONNX actors support replay and separately authorized broker workflows, with persistent state and checked journals. A read-only local dashboard observes development history, reports, and journals. The current real-data run stops at diagnostics; no model has qualified.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 Z" fill="#365df3"/></marker>
+    <marker id="read-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 Z" fill="#5a6d8e"/></marker>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+      .heading { font-size: 30px; font-weight: 700; fill: #101d31; }
+      .section { font-size: 15px; font-weight: 600; fill: #5a6d8e; }
+      .node-title { font-size: 19px; font-weight: 700; fill: #101d31; }
+      .body { font-size: 15px; fill: #5a6d8e; }
+      .small { font-size: 13px; fill: #5a6d8e; }
+      .box { fill: #fff; stroke: #dce5f1; stroke-width: 1.5; }
+      .flow { fill: none; stroke: #365df3; stroke-width: 2; marker-end: url(#arrow); }
+      .read { fill: none; stroke: #5a6d8e; stroke-width: 1.5; stroke-dasharray: 5 5; marker-end: url(#read-arrow); }
+    </style>
+  </defs>
+  <rect width="1200" height="1040" rx="16" fill="#f4f7fc"/>
+  <text x="56" y="54" class="heading">HFT · Intraday trading research</text>
+  <text x="56" y="82" class="body">Local CPU execution · five-second decisions · evidence before activation</text>
+
+  <text x="56" y="118" class="section">Acquisition and experiment identity</text>
+  <rect x="56" y="134" width="336" height="116" rx="10" class="box"/>
+  <text x="76" y="167" class="node-title">Market events</text>
+  <text x="76" y="194" class="body">Read-only historical REST data</text>
+  <text x="76" y="218" class="body">WebSocket recording with arrivals</text>
+  <rect x="432" y="134" width="336" height="116" rx="10" class="box"/>
+  <text x="452" y="167" class="node-title">Checked archives</text>
+  <text x="452" y="194" class="body">Parquet quotes/trades and provenance</text>
+  <text x="452" y="218" class="body">Session manifests and SHA-256 hashes</text>
+  <rect x="808" y="134" width="336" height="116" rx="10" class="box"/>
+  <text x="828" y="167" class="node-title">Frozen experiment</text>
+  <text x="828" y="194" class="body">Chronological development / final split</text>
+  <text x="828" y="218" class="body">Versioned data and execution identity</text>
+  <path d="M392 191 H429" class="flow"/>
+  <path d="M768 191 H805" class="flow"/>
+  <path d="M600 250 V301" class="flow"/>
+
+  <rect x="56" y="304" width="1088" height="110" rx="10" fill="#eaf0ff" stroke="#bdcdfb" stroke-width="1.5"/>
+  <text x="76" y="337" class="node-title">Shared causal behavior</text>
+  <text x="76" y="365" class="body">Completed bars · 17 features · long-only sizing · Decimal accounting · persistent risk checks</text>
+  <text x="76" y="391" class="small">Training, replay and local dry runs also share later-quote matching, displayed liquidity, partial fills and costs.</text>
+  <path d="M600 414 V460 H224 V469" class="flow"/>
+  <path d="M976 250 V301" class="flow"/>
+
+  <text x="56" y="450" class="section">Research · failed diagnostics stop fitting</text>
+  <rect x="56" y="472" width="336" height="138" rx="10" class="box"/>
+  <text x="76" y="505" class="node-title">Development diagnostics</text>
+  <text x="76" y="532" class="body">Coverage, continuity and memory</text>
+  <text x="76" y="556" class="body">No fitting or final-price inspection</text>
+  <text x="76" y="587" font-size="13" fill="#a65b00">Current MCD run stops here</text>
+  <rect x="432" y="472" width="336" height="138" rx="10" class="box"/>
+  <text x="452" y="505" class="node-title">CPU PPO search</text>
+  <text x="452" y="532" class="body">Expanding folds, seeds and controls</text>
+  <text x="452" y="556" class="body">Bounded budget and checkpoints</text>
+  <text x="452" y="587" class="small">Selected policy refit on development</text>
+  <rect x="808" y="472" width="336" height="138" rx="10" class="box"/>
+  <text x="828" y="505" class="node-title">Reserved final evaluation</text>
+  <text x="828" y="532" class="body">Durable reservation before price reads</text>
+  <text x="828" y="556" class="body">Controls, bootstrap and execution stress</text>
+  <text x="828" y="587" class="small">Export only uses supplied observations</text>
+  <path d="M392 540 H429" class="flow"/>
+  <path d="M768 540 H805" class="flow"/>
+  <path d="M976 610 V646 H780 V680 H224 V683" class="flow"/>
+  <text x="434" y="635" class="small">Actor export with action parity · a bundle alone does not qualify trading</text>
+
+  <text x="56" y="670" class="section">Deployment and separately gated operations</text>
+  <rect x="56" y="686" width="336" height="126" rx="10" class="box"/>
+  <text x="76" y="719" class="node-title">Immutable ONNX policy</text>
+  <text x="76" y="746" class="body">CPU inference and contract validation</text>
+  <text x="76" y="770" class="body">No PyTorch / SB3 runtime imports</text>
+  <rect x="432" y="686" width="336" height="126" rx="10" class="box"/>
+  <text x="452" y="719" class="node-title">Replay / streaming</text>
+  <text x="452" y="746" class="body">Local simulator or broker adapter</text>
+  <text x="452" y="770" class="body">Broker orders need separate gates</text>
+  <rect x="808" y="686" width="336" height="126" rx="10" class="box"/>
+  <text x="828" y="719" class="node-title">State and evidence</text>
+  <text x="828" y="746" class="body">Durable account state and checked journals</text>
+  <text x="828" y="770" class="body">Reconciliation and recomputed eligibility</text>
+  <path d="M392 748 H429" class="flow"/>
+  <path d="M768 748 H805" class="flow"/>
+  <path d="M56 359 H32 V836 H600 V815" class="read"/>
+  <text x="60" y="857" class="small">Shared behavior supports research and runtime; the dashboard observes their artifacts.</text>
+  <path d="M976 812 V891" class="read"/>
+
+  <rect x="56" y="894" width="1088" height="88" rx="10" class="box"/>
+  <text x="76" y="926" class="node-title">Read-only dashboard · loopback Python API + React / Vite</text>
+  <text x="76" y="953" class="body">Development history, reports and journals only · no reserved prices, order endpoints or activation controls</text>
+  <text x="56" y="1014" class="small">Capability map, not a completed profitable run. See docs/architecture.md for phase boundaries and known limitations.</text>
+</svg>

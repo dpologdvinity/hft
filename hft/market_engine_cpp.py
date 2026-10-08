@@ -78,6 +78,10 @@ class CppMarketEngine:
         self._native.end_session()
         self.history.clear()
 
+    def mark_gap(self, now_ns):
+        self._native.mark_gap(now_ns)
+        self.history.clear()
+
     def reset_history(self):
         self._native.reset_history()
         self.history.clear()

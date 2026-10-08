@@ -68,6 +68,11 @@ class PyMarketEngine:
         self.session = self.aggregator = None
         self.history.clear()
 
+    def mark_gap(self, now_ns):
+        """Live feed silence: drop history and restart warmup after `now_ns`."""
+        self.history.clear()
+        self.warmup_after_ns = now_ns
+
     def reset_history(self):
         self.history.clear()
 

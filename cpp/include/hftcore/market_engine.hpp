@@ -39,6 +39,11 @@ class MarketEngine {
   void start_session(const Session& session, std::optional<std::int64_t> now_ns);
   void end_session();
   void reset_history() { history_.clear(); }
+  // Live feed silence: drop history and restart warmup after now_ns.
+  void mark_gap(std::int64_t now_ns) {
+    history_.clear();
+    warmup_after_ns_ = now_ns;
+  }
 
   // Each call first runs the arrival-gap check, then feeds the aggregator.
   std::vector<Update> on_quote(const Quote& quote, std::optional<std::string_view> identity);

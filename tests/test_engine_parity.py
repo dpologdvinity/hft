@@ -142,3 +142,36 @@ def test_market_engine_matches_reference_on_sessions(hftcore, strategy):
     assert _engine_run(native, window, timeline, late) == _engine_run(
         python, window, timeline, late
     )
+
+
+@pytest.mark.parametrize("strategy", ["model", "ema-crossover"])
+def test_mark_gap_matches_reference(hftcore, strategy):
+    from hft.calendar import SessionWindow
+
+    data = synthetic_sessions(1, 200, seed=6)[0]
+    window = SessionWindow(data.session_id, data.open_ns, data.close_ns)
+    timeline = list(historical_timeline(data))
+    gap_at = timeline[len(timeline) // 2][1]
+    marked = [
+        *timeline[: len(timeline) // 2],
+        ("mark_gap", gap_at),
+        *timeline[len(timeline) // 2 :],
+    ]
+
+    def run(engine):
+        engine.start_session(window)
+        rows = []
+        for event, now in marked:
+            if event == "mark_gap":
+                engine.mark_gap(now)
+                updates = []
+            elif event is None:
+                updates = engine.advance_to(now)
+            else:
+                updates = engine.on_event(event, now)
+            rows += [(getattr(u, "bar", u), getattr(u, "action", None)) for u in updates]
+            rows.append((tuple(engine.history), engine.warmup_after_ns))
+        return rows
+
+    python, native = _engines(hftcore, data.symbol, strategy)
+    assert run(native) == run(python)

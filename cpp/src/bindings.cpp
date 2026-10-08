@@ -261,6 +261,7 @@ PYBIND11_MODULE(hftcore, m) {
           py::arg("now_ns") = py::none())
       .def("end_session", &MarketEngine::end_session)
       .def("reset_history", &MarketEngine::reset_history)
+      .def("mark_gap", &MarketEngine::mark_gap, py::arg("now_ns"))
       .def("on_event", &engine_event, py::arg("event"), py::arg("arrival_ns"))
       .def(
           "advance_to",

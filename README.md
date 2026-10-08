@@ -150,7 +150,7 @@ sells at the next open. Whole shares go through the closing and opening auctions
 use fractional limit orders just before the close and market orders before 09:28,
 which Alpaca fills at the opening price.
 Stopping it cancels open orders and keeps positions, which a restart sells at the
-next open. Over 2016-2024 the overnight effect was real before costs (+5.88 bp per
+next open. Over 2016-2024 the overnight effect was clear before costs (+5.88 bp per
 night) but a pre-registered test with about 4 bp of auction costs per round trip
 did not clear zero ([results](docs/overnight-auction-results.md)), so the paper run
 proves the order flow; it is not evidence of an edge.

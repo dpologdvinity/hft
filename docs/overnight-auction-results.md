@@ -26,7 +26,7 @@ Net overnight return of the stocks by year: 2016 -4.06, 2017 +3.35, 2018 +1.02,
 Fails the pre-registered criterion: the stocks' net mean of +1.43 bp per night has
 a 95% interval from -2.14 to +4.89, which includes zero.
 
-The effect itself is real. Before costs, overnight holding earned +5.88 bp per night
+The effect is statistically clear before costs. Overnight holding earned +5.88 bp per night
 on the stocks and +4.54 bp on the ETFs, with both intervals above zero, and more
 than holding the same stocks during the day. The ETFs have no survivorship bias, so
 the stock result is not just a product of picking winners. The problem is size:
@@ -40,3 +40,5 @@ going to prove the order flow (auction orders accepted, filled, reconciled and
 held overnight safely) and to show the simulated fill prices, not as evidence of a
 profitable strategy. Measuring real auction costs would need tiny live orders,
 which stay locked behind research qualification and paper graduation.
+
+Intervals use one random generator seeded with 0, shared by every summary in the order the script reports them, so rerunning the script reproduces them exactly.

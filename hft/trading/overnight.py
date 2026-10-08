@@ -15,17 +15,21 @@ through the auctions wherever Alpaca allows it and is judged forward on paper:
   received before 09:28 at the official opening price). Any position still held
   after the open is sold with a day market order, retried each minute.
 
-Day buys are limit orders sized so quantity x limit fits the stock's cash;
-market-on-close buys are sized as if filled 2% above the 15:45 trade, so only a
-larger rise into the close could exceed the cash (the ledger then refuses the fill
-and reconciliation stops the run for review). Positions are held overnight on purpose (owner
-decision, 2026-10-08). Each stock keeps its own ledger and order book on one paper
+Day buys are limit orders sized so quantity x limit fits the stock's cash.
+Market-on-close buys are sized as if filled 2% above the 15:45 trade; a larger rise
+into the close still fills, and the ledger records it (its cash goes negative and
+that stock's entries wait) so the holding is sold at the open as usual. There is no
+spread guard: auctions trade at the official price and day buys are capped 1% above
+the last trade. Positions are held overnight on purpose (owner decision,
+2026-10-08). Each stock keeps its own ledger and order book on one paper
 account, reusing the `PortfolioBroker` startup checks, durable order state and
 reconciliation. A run that stops overnight keeps its positions; restarting it
 sells them at the next open. Entries stop for the day after the account-wide daily
-loss limit and for good after the drawdown limit (both persisted); exits are never
-blocked. Network and broker errors are logged and retried; only a reconciliation
-mismatch that survives a fresh poll stops the run.
+loss limit and for good after the drawdown limit; both decisions are saved, so a
+restart cannot lift them. Exits are never blocked. Dividends paid on the stocks are
+booked to their ledgers. Network and broker errors are logged and retried; a broker
+report that contradicts the ledger, a reconciliation mismatch that survives a fresh
+poll, or an order unresolved for three hours stops the run for review.
 """
 
 import asyncio
@@ -36,7 +40,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from ..account import decimal
-from ..broker import BrokerHTTPError, BrokerOrder
+from ..broker import BrokerHTTPError, BrokerIntegrityError, BrokerOrder
 from ..logs import EventLog
 from ..risk import RiskDecision
 from ..sizing import OrderIntent
@@ -57,6 +61,7 @@ MAX_PRICE_AGE = 10 * MINUTE  # entries need a recent trade
 QUANTITY_STEP = Decimal("0.000001")
 MINIMUM_NOTIONAL = Decimal(1)
 ERROR_BACKOFF_SECONDS = 30.0
+STUCK_ORDER_NS = 3 * 3600 * NS  # auction orders resolve within 45 minutes of submission
 
 
 @dataclass(frozen=True)
@@ -73,6 +78,12 @@ class OvernightConfig:
 
 class OvernightBook(SymbolBook):
     """A stock's book that sends scheduled orders, including auction orders."""
+
+    def __init__(self, portfolio, symbol, account, risk):
+        super().__init__(portfolio, symbol, account, risk)
+        # A market-on-close fill above its sizing cap is still a fact: record it, so the
+        # holding is sold at the open, instead of losing track of broker shares.
+        self.account.allow_overdraft = True
 
     def submit_order(
         self, side, quantity, time_in_force, reference_price, now_ns, *, limit=None, cap=None
@@ -155,12 +166,18 @@ class OvernightBook(SymbolBook):
                 raise
 
 
+_DATA_CLIENT = None
+
+
 def last_trade_prices(symbols):
     """{symbol: (price, trade time in UTC ns)} from the latest IEX trades (read-only)."""
     from ..feed import parse_timestamp
     from ..history import DATA_BASE, ReadOnlyClient
 
-    client = ReadOnlyClient()
+    global _DATA_CLIENT
+    if _DATA_CLIENT is None:
+        _DATA_CLIENT = ReadOnlyClient()  # one client, so its request budget holds
+    client = _DATA_CLIENT
     prices = {}
     for symbol in symbols:
         payload = client.get(f"{DATA_BASE}/v2/stocks/{symbol}/trades/latest", {"feed": "iex"})
@@ -269,6 +286,8 @@ class OvernightRunner:
                 opening_notional=trade.opening_notional,
             )
         self.trades_seen[symbol] = len(trades)
+        if book.account.cash < 0:
+            self._quality("fill cost more than the stock's cash; entries wait", [symbol])
         log.write(
             "equity",
             event_ns=execution.timestamp,
@@ -283,7 +302,9 @@ class OvernightRunner:
             try:
                 fills = self.broker.book(symbol).poll()
             except ValueError as error:  # the ledger refused a confirmed fill: stop for review
-                raise RuntimeError(f"{symbol} fill mismatch: {error}") from error
+                raise BrokerIntegrityError(f"{symbol} fill mismatch: {error}") from error
+            except BrokerIntegrityError:
+                raise
             except (RuntimeError, OSError) as error:
                 self._quality(f"poll: {error}", [symbol])
                 continue
@@ -359,6 +380,13 @@ class OvernightRunner:
         key = (None, window.session_id, "guard")
         if key in self.attempted:
             return True
+        saved = self.broker.extra.get("guard_session")
+        if saved and saved["session"] == window.session_id:
+            # Already checked this session before a restart: keep its decision rather than
+            # re-observing against the new baseline, which would lift a daily-loss halt.
+            self.attempted.add(key)
+            self._apply_guard(saved["reason"], now, log=False)
+            return True
         if self.clock() < self.retry_after.get(key, 0):
             return False
         if not self._fetch(self.config.symbols):
@@ -377,12 +405,20 @@ class OvernightRunner:
         reason = self.guard.observe(equity)
         self.guard.start_session(equity)
         self.broker.extra["guard"] = self.guard.to_state()
+        self.broker.extra["guard_session"] = {"session": window.session_id, "reason": reason}
+        self._apply_guard(reason, now, log=True)
+        self.broker.save()
+        return True
+
+    def _apply_guard(self, reason, now, *, log):
         for symbol in self.config.symbols:
             book = self.broker.book(symbol)
             book.risk.halted = reason or self.guard.latched
             book.risk.permanent_halt = book.risk.permanent_halt or self.guard.latched is not None
-            if reason:
+            if reason and log:
                 self.logs[symbol].write("halt", event_ns=now, reason=reason)
+            if not log:
+                continue
             price = self._fresh_price(symbol, now)
             self.logs[symbol].write(
                 "equity",
@@ -391,8 +427,6 @@ class OvernightRunner:
                 cash=book.account.cash,
                 position=book.account.position,
             )
-        self.broker.save()
-        return True
 
     def _entries(self, window, now):
         auction = window.close_ns - AUCTION_ENTRY[0] <= now < window.close_ns - AUCTION_ENTRY[1]
@@ -411,9 +445,16 @@ class OvernightRunner:
             ):
                 continue
             if fractional and not self._fetch([symbol]):
+                self.retry_after[key] = self.clock() + 10 * NS  # respect the data rate limit
                 continue
             price = self._fresh_price(symbol, now)
             if price is None:
+                stale = (symbol, window.session_id, "stale")
+                if stale not in self.attempted:
+                    self.attempted.add(stale)
+                    self._quality("entry skipped: no trade in the last 10 minutes", [symbol])
+                if fractional:
+                    self.retry_after[key] = self.clock() + 10 * NS
                 continue
             cash = book.account.cash * CASH_USE
             auction_cap = price * AUCTION_CAP
@@ -433,10 +474,16 @@ class OvernightRunner:
                 self._submit(
                     symbol, "buy", quantity, "day", price, now, "entry-late", window, limit
                 )
+            else:
+                self.attempted.add(key)  # too little cash for an order today
 
     # Main loop --------------------------------------------------------------
     def _tick(self, state):
         now = self.clock()
+        for symbol in self.config.symbols:
+            order = self.broker.book(symbol).pending
+            if order and now - order.intent.created_ns > STUCK_ORDER_NS:
+                raise BrokerIntegrityError(f"{symbol} order unresolved for 3 hours")
         busy = any(self.broker.book(s).pending for s in self.config.symbols)
         if now - state["poll"] >= (5 if busy else 60) * NS:
             self._poll()
@@ -485,8 +532,11 @@ class OvernightRunner:
                     await self.sleep(ERROR_BACKOFF_SECONDS)
                     continue
                 except RuntimeError as error:
-                    if "mismatch" in str(error) or "unexpected broker" in str(error):
-                        raise  # confirmed reconciliation failure: stop for a human
+                    stop = isinstance(error, BrokerIntegrityError) or any(
+                        text in str(error) for text in ("mismatch", "unexpected broker")
+                    )
+                    if stop:
+                        raise  # the broker contradicts the ledger: stop for a human
                     self._quality(f"error: {error}; retrying")
                     await self.sleep(ERROR_BACKOFF_SECONDS)
                     continue

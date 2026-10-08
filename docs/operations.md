@@ -204,9 +204,15 @@ Bar strategies decide on 5-second bars and are flat at every close. Stopping one
 The times move with early closes. Before each entry the account-wide guard marks
 holdings at the latest IEX trade: losing the daily limit since the previous entry
 skips that day's entries, and the drawdown limit stops entries for good. Exits are
-never blocked. Broker,
-network and market-data errors are logged as `quality` rows and retried; only a
-reconciliation mismatch that survives a fresh poll stops the run. Stopping the run
+never blocked, and both
+guard decisions survive restarts. A market-on-close fill above its sizing cap is still
+recorded (the stock's cash goes negative and its entries wait) and sold at the open.
+Overnight entries have no spread guard: auctions trade at the official price and day
+buys are capped 1% above the last trade. Dividends on the stocks are booked to their
+ledgers during reconciliation. Broker, network and market-data errors are logged as
+`quality` rows and retried; a broker report that contradicts the ledger, a
+reconciliation mismatch that survives a fresh poll, or an order unresolved for three
+hours stops the run. Stopping the run
 cancels open orders but keeps positions, because the market is usually closed;
 restarting it sells them at the next open.
 

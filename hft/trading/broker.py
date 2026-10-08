@@ -8,9 +8,10 @@ configured stock plus the account cash.
 """
 
 from decimal import Decimal
+from urllib.parse import urlencode
 
 from ..account import Account, decimal
-from ..broker import AlpacaBroker, BrokerOrder, cash_tolerance
+from ..broker import AlpacaBroker, BrokerIntegrityError, BrokerOrder, cash_tolerance
 from ..risk import RiskDecision
 from ..state import AccountStateStore
 
@@ -96,6 +97,7 @@ class PortfolioBroker:
                     raise ValueError("run identity changed; start a new run name")
                 self.remote_initial_cash = decimal(state["remote_initial_cash"])
                 self.cash_anchor = state.get("cash_anchor")
+                self.income_ids = set(state.get("income_ids", []))
                 for symbol, saved in state["books"].items():
                     book = book_class(
                         self, symbol, Account.from_state(saved["account"]), risk_factory(symbol)
@@ -124,6 +126,7 @@ class PortfolioBroker:
                     raise ValueError("stock budgets exceed the paper account's non-borrowed cash")
                 self.remote_initial_cash = decimal(self.account_snapshot["cash"])
                 self.cash_anchor = None
+                self.income_ids = set()
                 for symbol, budget in self.budgets.items():
                     self.books[symbol] = book_class(
                         self, symbol, Account(budget, costs), risk_factory(symbol)
@@ -155,6 +158,8 @@ class PortfolioBroker:
         for symbol, book in self.books.items():
             try:
                 fills += [(symbol, e) for e in book.poll()]
+            except BrokerIntegrityError:
+                raise  # the broker contradicts the ledger: stop for review
             except (RuntimeError, OSError) as error:
                 self.poll_errors[symbol] = str(error)
         return fills
@@ -197,11 +202,37 @@ class PortfolioBroker:
         }
         broker_cash = decimal(snapshot["cash"])
         expected = decimal(anchor["broker"]) + ledger - decimal(anchor["ledger"])
-        if abs(broker_cash - expected) > cash_tolerance(fills - anchor["fills"]):
-            raise RuntimeError("broker cash mismatch; trading stopped for reconciliation")
+        tolerance = cash_tolerance(fills - anchor["fills"])
+        if abs(broker_cash - expected) > tolerance:
+            income = self._book_income(broker_cash - expected, tolerance)
+            if income is None:
+                raise RuntimeError("broker cash mismatch; trading stopped for reconciliation")
+            ledger += income
         self.cash_anchor = {"broker": str(broker_cash), "ledger": str(ledger), "fills": fills}
         self.account_snapshot = snapshot
         return True
+
+    def _book_income(self, difference, tolerance):
+        """Dividends paid on the run's stocks explain a cash difference: credit each to
+        its stock's ledger and return the total. None when they do not explain it."""
+        query = urlencode({"direction": "desc", "page_size": 100})
+        rows = self.client.request("GET", f"/v2/account/activities?{query}") or []
+        new = [
+            r
+            for r in rows
+            if str(r.get("activity_type", "")).startswith("DIV")
+            and r.get("id") not in self.income_ids
+            and r.get("symbol") in self.books
+        ]
+        total = sum((decimal(r["net_amount"]) for r in new), Decimal(0))
+        if not new or abs(difference - total) > tolerance:
+            return None
+        for r in new:
+            self.books[r["symbol"]].account.record_income(
+                r["net_amount"], self.clock(), f"{r['activity_type']}:{r['id']}"
+            )
+            self.income_ids.add(r["id"])
+        return total
 
     def save(self):
         self.store.save(
@@ -211,6 +242,7 @@ class PortfolioBroker:
                 "identity": self.identity,
                 "remote_initial_cash": str(self.remote_initial_cash),
                 "cash_anchor": getattr(self, "cash_anchor", None),
+                "income_ids": sorted(getattr(self, "income_ids", set())),
                 "extra": getattr(self, "extra", {}),
                 "books": {
                     s: {

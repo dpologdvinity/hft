@@ -34,6 +34,10 @@ def cash_tolerance(fills):
     return CASH_TOLERANCE + ROUNDING_PER_FILL * fills
 
 
+class BrokerIntegrityError(RuntimeError):
+    """A broker report that contradicts the ledger; retrying cannot fix it."""
+
+
 class BrokerHTTPError(RuntimeError):
     """An HTTP error response; the status lets callers tell refusals from unknowns."""
 
@@ -407,14 +411,14 @@ class AlpacaBroker:
             or row.get("symbol") != self.symbol
             or row.get("side") != intent.side
         ):
-            raise RuntimeError("broker order identity mismatch")
+            raise BrokerIntegrityError("broker order identity mismatch")
         filled = decimal(row["filled_qty"])
         if not filled.is_finite() or filled < 0 or filled > intent.quantity:
-            raise RuntimeError("broker overfill or invalid quantity")
+            raise BrokerIntegrityError("broker overfill or invalid quantity")
         if filled < order.filled:
             if allow_old:
                 return ()
-            raise RuntimeError("broker cumulative fill moved backward")
+            raise BrokerIntegrityError("broker cumulative fill moved backward")
         executions = ()
         if filled > order.filled:
             average = decimal(row["filled_avg_price"])
@@ -424,7 +428,7 @@ class AlpacaBroker:
             commission = decimal(row.get("commission") or 0)
             fee = commission - order.fee
             if price <= 0 or not price.is_finite() or fee < 0:
-                raise RuntimeError("invalid cumulative execution price/fee")
+                raise BrokerIntegrityError("invalid cumulative execution price/fee")
             stamp = row.get("filled_at") or row.get("updated_at")
             timestamp = parse_timestamp(stamp) if stamp else self.clock()
             execution = Execution(

@@ -274,7 +274,7 @@ def test_price_failures_are_logged_and_skip_entries_without_stopping(tmp_path):
         tmp_path, clock, exchange, {"BIG": 1000}, DAY1.close_ns + 600 * NS, quotes=broken
     )
     assert exchange.posts == [] and summary["BIG"]["position"] == "0"
-    reasons = [r.get("reason", "") for r in _rows(tmp_path, "BIG")]
+    reasons = [r.get("reason") or "" for r in _rows(tmp_path, "BIG")]
     assert any("market data unavailable" in r for r in reasons)
 
 
@@ -319,3 +319,60 @@ def test_the_cli_starts_an_overnight_run_on_the_paper_account(tmp_path, monkeypa
     assert type(runner).__name__ == "OvernightRunner"
     assert type(runner.broker.book("BIG")).__name__ == "OvernightBook"
     assert set(summary) == {"BIG", "SMALL"}
+
+
+def test_an_on_close_fill_above_its_sizing_cap_is_kept_and_sold_at_the_open(tmp_path):
+    def jumpy(symbol, at):
+        if at >= DAY2.open_ns:
+            return Decimal(57)
+        return Decimal(56) if at >= DAY1.close_ns else Decimal(50)  # close 12% above 15:45
+
+    clock = Clock(START)
+    exchange = Exchange(clock, jumpy)
+    budgets = {"BIG": 1000}
+    summary = _run(
+        tmp_path,
+        clock,
+        exchange,
+        budgets,
+        DAY2.open_ns + 1800 * NS,
+        quotes=lambda symbols: {s: (jumpy(s, clock()), clock()) for s in symbols},
+    )
+    sides = [(s, side, tif) for s, side, tif, _ in exchange.posts]
+    assert sides == [("BIG", "buy", "cls"), ("BIG", "sell", "opg")]
+    assert exchange.positions == {"BIG": 0} and summary["BIG"]["position"] == "0"
+    assert Decimal(summary["BIG"]["cash"]) == Decimal(1000) + 19 * Decimal(1)  # 56 -> 57
+    reasons = [r.get("reason") or "" for r in _rows(tmp_path, "BIG")]
+    assert any("more than the stock's cash" in r for r in reasons)
+
+
+def test_a_daily_loss_halt_survives_a_restart_in_the_entry_window(tmp_path):
+    clock = Clock(START)
+    exchange = Exchange(clock, prices)
+
+    def lost_today(runner):
+        runner.guard.day_start = Decimal(10_000)  # equity is far below the day's start
+
+    budgets = {"BIG": 1000}
+    _run(tmp_path, clock, exchange, budgets, DAY1.close_ns - 12 * 60 * NS, guard=lost_today)
+    assert exchange.posts == []
+    # Restarted while the on-close window is still open: the halt must hold.
+    _run(tmp_path, clock, exchange, budgets, DAY1.close_ns)
+    assert exchange.posts == []
+
+
+def test_a_contradicting_broker_report_stops_the_run(tmp_path, monkeypatch):
+    from hft.broker import BrokerIntegrityError
+
+    clock = Clock(START)
+    exchange = Exchange(clock, prices)
+    original = OvernightBook.poll
+
+    def contradicted(self):
+        if exchange.posts:
+            raise BrokerIntegrityError("broker cumulative fill moved backward")
+        return original(self)
+
+    monkeypatch.setattr(OvernightBook, "poll", contradicted)
+    with pytest.raises(BrokerIntegrityError):
+        _run(tmp_path, clock, exchange, {"BIG": 1000}, DAY2.open_ns + 1800 * NS)

@@ -37,6 +37,8 @@ class Exchange:
                 self.cash -= sign * qty * Decimal(price)
 
     def request(self, method, path, body=None):
+        if path.startswith("/v2/account/activities"):
+            return list(getattr(self, "activities", []))
         if path == "/v2/account":
             return {"id": "paper-1", "status": "ACTIVE", "cash": str(self.cash)}
         if path == "/v2/clock":
@@ -250,5 +252,43 @@ def test_reconcile_allows_the_brokers_per_fill_cent_rounding(tmp_path):
         exchange.cash -= Decimal("0.05")  # an unexplained charge is still caught
         with pytest.raises(RuntimeError, match="cash mismatch"):
             broker.reconcile()
+    finally:
+        broker.close()
+
+
+def test_dividends_on_held_stocks_are_booked_instead_of_stopping(tmp_path):
+    exchange = Exchange()
+    broker = portfolio(tmp_path, exchange)
+    try:
+        assert broker.reconcile()
+        exchange.cash += Decimal("0.42")
+        exchange.activities = [
+            {"id": "d1", "activity_type": "DIV", "symbol": "NVDA", "net_amount": "0.42"}
+        ]
+        assert broker.reconcile()
+        account = broker.book("NVDA").account
+        assert account.cash == Decimal(300) + Decimal("0.42")
+        assert account.income[0]["source"] == "DIV:d1"
+        assert broker.reconcile()  # booked once, not again
+        exchange.cash += Decimal("0.42")  # the same activity cannot explain new cash
+        with pytest.raises(RuntimeError, match="cash mismatch"):
+            broker.reconcile()
+    finally:
+        broker.close()
+
+
+def test_integrity_errors_are_not_hidden_by_per_book_polling(tmp_path, monkeypatch):
+    from hft.broker import BrokerIntegrityError
+
+    exchange = Exchange()
+    broker = portfolio(tmp_path, exchange)
+    try:
+
+        def contradicted():
+            raise BrokerIntegrityError("broker overfill or invalid quantity")
+
+        monkeypatch.setattr(broker.book("NVDA"), "poll", contradicted)
+        with pytest.raises(BrokerIntegrityError):
+            broker.poll()
     finally:
         broker.close()

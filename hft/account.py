@@ -62,6 +62,9 @@ class Account:
         self.cash = self.initial_cash
         self.session_start_equity = self.initial_cash
         self.costs = costs or Costs()
+        # Only ledgers that mirror a broker set this: a confirmed fill is a fact even when
+        # a market order cost more than the cash it was sized for.
+        self.allow_overdraft = False
         self.position = Decimal(0)
         self.entry_price = Decimal(0)
         self.entry_fees = Decimal(0)
@@ -69,6 +72,7 @@ class Account:
         self.opened = 0
         self.fills = []
         self.cash_flows = []
+        self.income = []
         self._seen = {}
         self._trades = []
         self._roundtrip_pnl = Decimal(0)
@@ -117,7 +121,8 @@ class Account:
             or f < 0
         ):
             raise ValueError("invalid execution")
-        if self.position + q < 0 or self.cash - q * p - f < 0:
+        overdrawn = self.cash - q * p - f < 0 and not self.allow_overdraft
+        if self.position + q < 0 or overdrawn:
             raise ValueError("insufficient inventory or cash")
         if q > 0:
             if self.position == 0:
@@ -165,6 +170,17 @@ class Account:
         self.session_start_equity += amount
         self.cash_flows.append({"amount": str(amount), "timestamp_ns": int(timestamp_ns)})
 
+    def record_income(self, amount, timestamp_ns, source):
+        """Cash the broker paid on a holding (e.g. a dividend): profit, not a deposit."""
+        amount = decimal(amount)
+        if not amount.is_finite():
+            raise ValueError("invalid income")
+        self.cash += amount
+        self.realized_pnl += amount
+        self.income.append(
+            {"amount": str(amount), "timestamp_ns": int(timestamp_ns), "source": str(source)}
+        )
+
     def execute(self, delta, price, fee, timestamp):
         execution = Execution(
             f"local-{len(self.fills)}",
@@ -199,6 +215,7 @@ class Account:
             "trades": [strings(t) for t in self._trades],
             "costs": asdict(self.costs),
             "cash_flows": self.cash_flows,
+            "income": self.income,
         }
 
     @classmethod
@@ -214,6 +231,7 @@ class Account:
         ):
             setattr(account, field, decimal(state[field]))
         account.cash_flows = list(state.get("cash_flows", []))
+        account.income = list(state.get("income", []))
         account.opened = state["opened"]
         account._roundtrip_pnl = decimal(state["roundtrip_pnl"])
         account._opening_notional = decimal(state["opening_notional"])

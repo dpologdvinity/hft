@@ -69,3 +69,5 @@ whose gross size roughly equals the cost. Lowering the cost would matter more
 than finding another signal: the 09:30 open-bucket half-spread (median 2.67 bp)
 is the largest single charge, and an opening-auction order would avoid it, but
 that needs execution modeling this project does not have yet.
+
+Intervals use one random generator seeded with 0, shared by every summary in the order the script reports them, so rerunning the script reproduces them exactly.

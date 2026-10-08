@@ -67,6 +67,7 @@ class TradeRunner:
         self.queued = {s: [] for s in config.symbols}
         self.silent = set()
         self.lagging = set()  # stocks dropping stale events until a fresh one arrives
+        self.poll_errors_logged = {}
         self.guard = AccountGuard(
             sum((Decimal(str(b)) for b in config.budgets.values()), Decimal(0)),
             config.daily_loss,
@@ -270,7 +271,14 @@ class TradeRunner:
     async def _poll(self):
         for symbol, execution in await self._io(self.broker.poll):
             self.engines[symbol].record_fills((execution,))
-        for symbol, error in getattr(self.broker, "poll_errors", {}).items():
+        errors = getattr(self.broker, "poll_errors", {})
+        self.poll_errors_logged = {
+            s: e for s, e in self.poll_errors_logged.items() if errors.get(s) == e
+        }
+        for symbol, error in errors.items():
+            if self.poll_errors_logged.get(symbol) == error:
+                continue  # journal a repeating error once, not every poll
+            self.poll_errors_logged[symbol] = error
             self.engines[symbol].log.write(
                 "quality", event_ns=self.clock(), reason=f"poll: {error}"
             )

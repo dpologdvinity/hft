@@ -50,6 +50,14 @@ class Exchange:
         if due is None or now < due:
             return
         price = self._price(order["symbol"], due)
+        if (
+            order.get("limit_price")
+            and order["side"] == "buy"
+            and price > Decimal(order["limit_price"])
+        ):
+            if order["time_in_force"] != "day":
+                order["status"] = "canceled"  # an on-close limit that the close missed
+            return
         qty, sign = Decimal(order["qty"]), 1 if order["side"] == "buy" else -1
         self.positions[order["symbol"]] = self.positions.get(order["symbol"], 0) + sign * qty
         self.cash -= sign * qty * price
@@ -112,7 +120,7 @@ def prices(symbol, at):
     return base * (Decimal("1.02") if at >= DAY2.open_ns else 1)  # +2% overnight
 
 
-def _run(tmp_path, clock, exchange, budgets, until, guard=None):
+def _run(tmp_path, clock, exchange, budgets, until, guard=None, quotes=None):
     broker = PortfolioBroker(
         exchange,
         budgets,
@@ -135,7 +143,7 @@ def _run(tmp_path, clock, exchange, budgets, until, guard=None):
         config,
         broker,
         [DAY1, DAY2],
-        prices=lambda symbols: {s: prices(s, clock()) for s in symbols},
+        prices=quotes or (lambda symbols: {s: (prices(s, clock()), clock()) for s in symbols}),
         clock=clock,
         sleep=clock.sleep,
     )
@@ -218,10 +226,11 @@ def test_auction_orders_must_be_whole_shares(tmp_path):
     )
     try:
         book = broker.book("SMALL")
-        decision = book.submit_order("buy", "0.2", "cls", 400, clock())
+        decision = book.submit_order("buy", "0.2", "cls", 400, clock(), limit=400)
         assert decision.reason == "fractional_auction_order"
-        assert book.submit_order("buy", 1, "cls", 400, clock()).reason == "cash_limit"
-        assert book.submit_order("buy", "0.2", "day", 400, clock()).allowed
+        assert book.submit_order("buy", 1, "cls", 400, clock()).reason == "buy_needs_limit"
+        assert book.submit_order("buy", 1, "cls", 400, clock(), limit=400).reason == "cash_limit"
+        assert book.submit_order("buy", "0.2", "day", 400, clock(), limit=400).allowed
     finally:
         broker.close()
 
@@ -238,3 +247,32 @@ def test_scheduled_strategy_is_parsed_and_refused_by_bar_replay():
     )
     with pytest.raises(ValueError, match="multiday_rules"):
         handle_replay(args)
+
+
+def test_a_latched_drawdown_survives_a_restart(tmp_path):
+    clock = Clock(START)
+    exchange = Exchange(clock, prices)
+
+    def latched(runner):
+        runner.guard.peak = Decimal(10_000)  # equity far below the peak: drawdown latches
+
+    _run(tmp_path, clock, exchange, {"BIG": 1000}, DAY1.close_ns - 600 * NS, guard=latched)
+    assert exchange.posts == []
+    clock.now = DAY2.close_ns - 3600 * NS
+    _run(tmp_path, clock, exchange, {"BIG": 1000}, DAY2.close_ns)
+    assert exchange.posts == []  # still halted after the restart
+
+
+def test_price_failures_are_logged_and_skip_entries_without_stopping(tmp_path):
+    clock = Clock(START)
+    exchange = Exchange(clock, prices)
+
+    def broken(symbols):
+        raise RuntimeError("market data unavailable")
+
+    summary = _run(
+        tmp_path, clock, exchange, {"BIG": 1000}, DAY1.close_ns + 600 * NS, quotes=broken
+    )
+    assert exchange.posts == [] and summary["BIG"]["position"] == "0"
+    reasons = [r.get("reason", "") for r in _rows(tmp_path, "BIG")]
+    assert any("market data unavailable" in r for r in reasons)

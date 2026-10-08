@@ -5,21 +5,24 @@ but on free data the spread paid to trade at those times eats the effect
 (docs/multiday-results.md). Auction orders avoid the spread, so this runner trades
 through the auctions wherever Alpaca allows it and is judged forward on paper:
 
-- Entry, 15:45-15:49 ET: a market-on-close order (`time_in_force=cls`) for whole
+- Entry, 15:45-15:49:30 ET: a limit-on-close order (`time_in_force=cls`) for whole
   shares when they use at least 90% of the stock's cash. Otherwise, 15:57-15:59 ET:
-  a fractional market order. Alpaca accepts fractional quantities only for day
-  orders, and on-close orders are refused after 15:50.
+  a fractional marketable limit order. Alpaca accepts fractional quantities only
+  for day orders, and refuses on-close orders after the 15:50 cutoff.
 - Exit, 09:00-09:27:30 ET: a market-on-open order (`opg`) for whole-share
   positions, or a day market order for fractional ones (Alpaca fills market orders
   received before 09:28 at the official opening price). Any position still held
-  after the open is sold with a day market order.
+  after the open is sold with a day market order, retried each minute.
 
-Positions are held overnight on purpose (owner decision, 2026-10-08). Each stock
-keeps its own ledger and order book on one paper account, reusing the
-`PortfolioBroker` startup checks, durable order state and reconciliation. A run
-that stops overnight keeps its positions; restarting it sells them at the next
-open. Entries stop for the day after the account-wide daily loss limit, and for
-good after the drawdown limit; exits are never blocked.
+Buys are limit orders sized so that quantity x limit fits the stock's cash, so a
+fill can never overdraw its ledger. Positions are held overnight on purpose (owner
+decision, 2026-10-08). Each stock keeps its own ledger and order book on one paper
+account, reusing the `PortfolioBroker` startup checks, durable order state and
+reconciliation. A run that stops overnight keeps its positions; restarting it
+sells them at the next open. Entries stop for the day after the account-wide daily
+loss limit and for good after the drawdown limit (both persisted); exits are never
+blocked. Network and broker errors are logged and retried; only a reconciliation
+mismatch that survives a fresh poll stops the run.
 """
 
 import asyncio
@@ -30,7 +33,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from ..account import decimal
-from ..broker import BrokerOrder
+from ..broker import BrokerHTTPError, BrokerOrder
 from ..logs import EventLog
 from ..risk import RiskDecision
 from ..sizing import OrderIntent
@@ -44,9 +47,13 @@ AUCTION_ENTRY = (15 * MINUTE, 10 * MINUTE + 30 * NS)  # before the close
 FRACTIONAL_ENTRY = (3 * MINUTE, 1 * MINUTE)  # before the close
 PRE_OPEN_EXIT = (30 * MINUTE, 2 * MINUTE + 30 * NS)  # before the open
 WHOLE_SHARE_USE = Decimal("0.9")  # whole shares must use this much of the cash
-HEADROOM = Decimal("0.99")  # market orders can fill above the reference price
+AUCTION_LIMIT = Decimal("1.02")  # limit-on-close price above the last trade
+DAY_LIMIT = Decimal("1.01")  # marketable day limit above the last trade
+CASH_USE = Decimal("0.995")
+MAX_PRICE_AGE = 10 * MINUTE  # entries need a recent trade
 QUANTITY_STEP = Decimal("0.000001")
 MINIMUM_NOTIONAL = Decimal(1)
+ERROR_BACKOFF_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -62,10 +69,11 @@ class OvernightConfig:
 
 
 class OvernightBook(SymbolBook):
-    """A stock's book that sends scheduled market orders, including auction orders."""
+    """A stock's book that sends scheduled orders, including auction orders."""
 
-    def submit_order(self, side, quantity, time_in_force, reference_price, now_ns):
+    def submit_order(self, side, quantity, time_in_force, reference_price, now_ns, *, limit=None):
         quantity, price = decimal(quantity), decimal(reference_price)
+        limit = None if limit is None else decimal(limit)
         if self.pending:
             return RiskDecision(False, "order_outstanding")
         if self.rejections >= MAX_REJECTIONS_PER_SESSION and side == "buy":
@@ -81,20 +89,24 @@ class OvernightBook(SymbolBook):
         if side == "sell" and quantity > self.account.position:
             return RiskDecision(False, "inventory_limit")
         if side == "buy":
-            if self.risk.halted:
-                return RiskDecision(False, self.risk.halted)
+            if limit is None or not limit.is_finite() or limit <= 0:
+                return RiskDecision(False, "buy_needs_limit")  # a fill can never overdraw
+            if self.risk.permanent_halt or self.risk.halted:
+                return RiskDecision(False, self.risk.halted or "permanent_halt")
             if self.account.position > 0:
                 return RiskDecision(False, "already_long")
-            if quantity * price > self.account.cash:
+            if quantity * limit > self.account.cash:
                 return RiskDecision(False, "cash_limit")
             snapshot = self.account_snapshot
             free = min(
                 decimal(snapshot["cash"]),
                 decimal(snapshot.get("non_marginable_buying_power", snapshot["cash"])),
             )
-            if quantity * price > free:
+            if quantity * limit > free:
                 return RiskDecision(False, "broker_cash_limit")
-        intent = OrderIntent("hft-" + uuid4().hex, self.symbol, side, quantity, price, now_ns)
+        intent = OrderIntent(
+            "hft-" + uuid4().hex, self.symbol, side, quantity, limit or price, now_ns
+        )
         self.pending = BrokerOrder(intent)
         if side == "buy":
             self.risk.record_order(now_ns)
@@ -103,23 +115,54 @@ class OvernightBook(SymbolBook):
             "symbol": self.symbol,
             "qty": str(quantity),
             "side": side,
-            "type": "market",
+            "type": "market" if limit is None else "limit",
             "time_in_force": time_in_force,
             "client_order_id": intent.client_order_id,
             "extended_hours": False,
         }
+        if limit is not None:
+            body["limit_price"] = str(limit)
         return self._send(intent, body)
+
+    def poll(self):
+        """Like `AlpacaBroker.poll`, but a submission that never reached the broker is
+        cleared once a lookup by its client id confirms it does not exist."""
+        try:
+            return super().poll()
+        except BrokerHTTPError as error:
+            order = self.pending
+            stale = order and self.clock() - order.intent.created_ns > MINUTE
+            if error.status == 404 and order and not order.id and stale:
+                self.pending = None
+                self._save()
+                return ()
+            raise
+
+    def cancel(self):
+        """A cancel refused because the order is already final is confirmed by `poll`."""
+        try:
+            super().cancel()
+        except BrokerHTTPError as error:
+            if error.status not in (404, 422):
+                raise
 
 
 def last_trade_prices(symbols):
-    """Latest IEX trade price per stock (read-only market data)."""
+    """{symbol: (price, trade time in UTC ns)} from the latest IEX trades (read-only)."""
+    from ..feed import parse_timestamp
     from ..history import DATA_BASE, ReadOnlyClient
 
     client = ReadOnlyClient()
     prices = {}
     for symbol in symbols:
         payload = client.get(f"{DATA_BASE}/v2/stocks/{symbol}/trades/latest", {"feed": "iex"})
-        prices[symbol] = decimal(str(payload["trade"]["p"]))
+        trade = payload.get("trade") if isinstance(payload, dict) else None
+        if not isinstance(trade, dict) or "p" not in trade or "t" not in trade:
+            raise ValueError(f"no latest trade for {symbol}")
+        price = decimal(str(trade["p"]))
+        if not price.is_finite() or price <= 0:
+            raise ValueError(f"invalid latest trade for {symbol}")
+        prices[symbol] = (price, parse_timestamp(trade["t"]))
     return prices
 
 
@@ -139,16 +182,19 @@ class OvernightRunner:
             raise ValueError("the overnight runner trades the overnight-drift strategy")
         self.config, self.broker, self.windows = config, broker, windows
         self.prices, self.clock, self.sleep = prices, clock, sleep
-        self.calendar_source, self.calendar_ns = calendar_source, clock()
+        self.calendar_source = calendar_source
         self.started_ns = clock()
         self.guard = AccountGuard(
             sum((decimal(b) for b in config.budgets.values()), Decimal(0)),
             config.daily_loss,
             config.max_drawdown,
         )
-        self.attempted = set()  # (symbol, session_id, step) already tried
+        if "guard" in broker.extra:
+            self.guard.restore(broker.extra["guard"])
+        self.attempted = set()  # (symbol, session_id, step) sent to the broker
+        self.retry_after = {}  # (symbol, session_id, step) -> ns after a local refusal
         self.session_id = None
-        self.last_prices = {}
+        self.last_prices = {}  # symbol -> (price, trade ns)
         self.logs = {}
         for symbol in config.symbols:
             log = EventLog(config.log_dir / f"{symbol}-{self.started_ns}.jsonl", clock=clock)
@@ -171,6 +217,11 @@ class OvernightRunner:
             self.logs[symbol] = log
         self.trades_seen = {s: len(broker.book(s).account.trades) for s in config.symbols}
 
+    # Helpers --------------------------------------------------------------
+    def _window(self, now):
+        """The next session that has not closed yet."""
+        return next((w for w in self.windows if w.close_ns > now), None)
+
     @staticmethod
     def _near(window, now):
         """Within the order windows, plus margin for fills and retries after the open."""
@@ -179,17 +230,22 @@ class OvernightRunner:
             or window.close_ns - AUCTION_ENTRY[0] - MINUTE <= now < window.close_ns + 5 * MINUTE
         )
 
-    def _window(self, now):
-        """The next session that has not closed yet."""
-        return next((w for w in self.windows if w.close_ns > now), None)
+    def _quality(self, reason, symbols=None):
+        for symbol in symbols or self.config.symbols:
+            self.logs[symbol].write("quality", event_ns=self.clock(), reason=reason)
 
-    def _equity(self, prices):
-        total = Decimal(0)
-        for symbol in self.config.symbols:
-            account = self.broker.book(symbol).account
-            price = prices.get(symbol)
-            total += account.mark(price) if price is not None else account.cash
-        return total
+    def _fetch(self, symbols):
+        """Update `last_prices`; returns False (and logs) when the fetch fails."""
+        try:
+            self.last_prices.update(self.prices(list(symbols)))
+            return True
+        except (RuntimeError, OSError, KeyError, TypeError, ValueError) as error:
+            self._quality(f"price: {error}", symbols)
+            return False
+
+    def _fresh_price(self, symbol, now):
+        price, stamp = self.last_prices.get(symbol, (None, 0))
+        return price if price is not None and now - stamp <= MAX_PRICE_AGE else None
 
     def _record(self, symbol, execution):
         book, log = self.broker.book(symbol), self.logs[symbol]
@@ -205,21 +261,51 @@ class OvernightRunner:
                 opening_notional=trade.opening_notional,
             )
         self.trades_seen[symbol] = len(trades)
-        price = execution.price
         log.write(
             "equity",
             event_ns=execution.timestamp,
-            equity=book.account.mark(price),
+            equity=book.account.mark(execution.price),
             cash=book.account.cash,
             position=book.account.position,
         )
 
-    def _submit(self, symbol, side, quantity, tif, price, now, step, window):
-        book = self.broker.book(symbol)
-        self.attempted.add((symbol, window.session_id, step))
+    def _poll(self):
+        """Poll each book separately so one failure cannot hide another book's fills."""
+        for symbol in self.config.symbols:
+            try:
+                fills = self.broker.book(symbol).poll()
+            except (RuntimeError, OSError) as error:
+                self._quality(f"poll: {error}", [symbol])
+                continue
+            for execution in fills:
+                self._record(symbol, execution)
+
+    def _reconcile(self):
+        """Reconcile when no order is open; a mismatch must survive a fresh poll."""
+        if any(self.broker.book(s).pending for s in self.config.symbols):
+            return
+        try:
+            self.broker.reconcile()
+        except RuntimeError as first:
+            self._quality(f"reconcile retry: {first}")
+            self._poll()
+            self.broker.refresh()
+            self.broker.reconcile()  # a second mismatch stops the run
+        self.broker.save()
+
+    def _submit(self, symbol, side, quantity, tif, price, now, step, window, limit=None):
+        key = (symbol, window.session_id, step)
+        if self.clock() < self.retry_after.get(key, 0):
+            return None
         if self.clock() - self.broker.refreshed_ns > 4 * NS:
             self.broker.refresh()
-        decision = book.submit_order(side, quantity, tif, price, self.clock())
+        book = self.broker.book(symbol)
+        decision = book.submit_order(side, quantity, tif, price, self.clock(), limit=limit)
+        sent = decision.allowed or (decision.reason or "").startswith("broker_rejected")
+        if sent:
+            self.attempted.add(key)
+        else:
+            self.retry_after[key] = self.clock() + MINUTE  # local refusal: retry next minute
         self.logs[symbol].write(
             "order",
             event_ns=now,
@@ -227,133 +313,173 @@ class OvernightRunner:
             quantity=quantity,
             time_in_force=tif,
             reference_price=price,
+            limit_price=limit,
             allowed=decision.allowed,
             reason=decision.reason,
             step=step,
         )
         return decision
 
+    # Schedule ---------------------------------------------------------------
     def _exits(self, window, now):
         pre_open = window.open_ns - PRE_OPEN_EXIT[0] <= now < window.open_ns - PRE_OPEN_EXIT[1]
         session = window.open_ns <= now < window.close_ns - AUCTION_ENTRY[0]
+        if not (pre_open or session):
+            return
         for symbol in self.config.symbols:
             book = self.broker.book(symbol)
             position = book.account.position
             if position <= 0 or book.pending:
                 continue
-            if pre_open and (symbol, window.session_id, "exit") not in self.attempted:
+            price = self.last_prices.get(symbol, (book.account.entry_price, 0))[0]
+            if pre_open:
+                if (symbol, window.session_id, "exit") in self.attempted:
+                    continue
                 whole = position == position.to_integral_value()
-                price = self.last_prices.get(symbol) or book.account.entry_price
-                self._submit(
-                    symbol, "sell", position, "opg" if whole else "day", price, now, "exit", window
-                )
-            elif session:
-                # Retry at most once a minute: an unfilled opening order, or a restart.
+                tif = "opg" if whole else "day"
+                self._submit(symbol, "sell", position, tif, price, now, "exit", window)
+            else:
+                # Retry each minute: an unfilled opening order, or a run restarted late.
                 step = f"exit-{(now - window.open_ns) // MINUTE}"
                 if (symbol, window.session_id, step) not in self.attempted:
-                    price = self._price(symbol)
-                    if price is not None:
-                        self._submit(symbol, "sell", position, "day", price, now, step, window)
+                    self._submit(symbol, "sell", position, "day", price, now, step, window)
 
-    def _price(self, symbol):
-        try:
-            self.last_prices.update(self.prices([symbol]))
-        except (RuntimeError, OSError, KeyError, ValueError) as error:
-            self.logs[symbol].write("quality", event_ns=self.clock(), reason=f"price:{error}")
-            return None
-        return self.last_prices.get(symbol)
+    def _check_guard(self, window, now):
+        """Once per session before entries: one overnight cycle since the last check."""
+        key = (None, window.session_id, "guard")
+        if key in self.attempted:
+            return True
+        if self.clock() < self.retry_after.get(key, 0):
+            return False
+        if not self._fetch(self.config.symbols):
+            self.retry_after[key] = self.clock() + 10 * NS
+            return False
+        equity = Decimal(0)
+        for symbol in self.config.symbols:
+            account = self.broker.book(symbol).account
+            price = self._fresh_price(symbol, now)
+            if account.position > 0 and price is None:
+                self._quality("guard: no recent price for a held stock", [symbol])
+                self.retry_after[key] = self.clock() + 10 * NS
+                return False  # never mark a holding at zero; retry shortly
+            equity += account.mark(price) if price is not None else account.cash
+        self.attempted.add(key)
+        reason = self.guard.observe(equity)
+        self.guard.start_session(equity)
+        self.broker.extra["guard"] = self.guard.to_state()
+        for symbol in self.config.symbols:
+            book = self.broker.book(symbol)
+            book.risk.halted = reason or self.guard.latched
+            book.risk.permanent_halt = book.risk.permanent_halt or self.guard.latched is not None
+            if reason:
+                self.logs[symbol].write("halt", event_ns=now, reason=reason)
+            price = self._fresh_price(symbol, now)
+            self.logs[symbol].write(
+                "equity",
+                event_ns=now,
+                equity=book.account.mark(price) if price else book.account.cash,
+                cash=book.account.cash,
+                position=book.account.position,
+            )
+        self.broker.save()
+        return True
 
     def _entries(self, window, now):
         auction = window.close_ns - AUCTION_ENTRY[0] <= now < window.close_ns - AUCTION_ENTRY[1]
         fractional = (
             window.close_ns - FRACTIONAL_ENTRY[0] <= now < window.close_ns - FRACTIONAL_ENTRY[1]
         )
-        if not (auction or fractional):
+        if not (auction or fractional) or not self._check_guard(window, now):
             return
-        key = (None, window.session_id, "guard")
-        if key not in self.attempted:
-            self.attempted.add(key)
-            try:
-                self.last_prices.update(self.prices(list(self.config.symbols)))
-            except (RuntimeError, OSError, KeyError, ValueError):
-                pass
-            equity = self._equity(self.last_prices)
-            reason = self.guard.observe(equity)  # one overnight cycle since the last entry
-            self.guard.start_session(equity)
-            for symbol in self.config.symbols:
-                book = self.broker.book(symbol)
-                book.risk.halted = reason or self.guard.latched
-                book.risk.permanent_halt |= self.guard.latched is not None
-                if reason:
-                    self.logs[symbol].write("halt", event_ns=now, reason=reason)
-                price = self.last_prices.get(symbol)
-                self.logs[symbol].write(
-                    "equity",
-                    event_ns=now,
-                    equity=book.account.mark(price) if price else book.account.cash,
-                    cash=book.account.cash,
-                    position=book.account.position,
-                )
         for symbol in self.config.symbols:
             book = self.broker.book(symbol)
             if book.account.position > 0 or book.pending or book.risk.halted:
                 continue
-            price = self.last_prices.get(symbol)
+            key = (symbol, window.session_id, "entry-late")
+            if fractional and (
+                key in self.attempted or self.clock() < self.retry_after.get(key, 0)
+            ):
+                continue
+            if fractional and not self._fetch([symbol]):
+                continue
+            price = self._fresh_price(symbol, now)
             if price is None:
                 continue
-            cash = book.account.cash * HEADROOM
-            whole = (cash / price).to_integral_value(rounding=ROUND_DOWN)
+            cash = book.account.cash * CASH_USE
+            auction_limit = (price * AUCTION_LIMIT).quantize(Decimal("0.01"), ROUND_DOWN)
+            whole = (cash / auction_limit).to_integral_value(rounding=ROUND_DOWN)
             use_auction = whole >= 1 and whole * price >= book.account.cash * WHOLE_SHARE_USE
-            if (
-                auction
-                and use_auction
-                and (symbol, window.session_id, "entry") not in self.attempted
-            ):
-                self._submit(symbol, "buy", whole, "cls", price, now, "entry", window)
-            elif fractional and (symbol, window.session_id, "entry-late") not in self.attempted:
-                # Fractional stocks enter here; so does a whole-share stock whose on-close
-                # order failed or was never sent (a pending on-close order is skipped above).
-                price = self._price(symbol) or price
-                quantity = (book.account.cash * HEADROOM / price).quantize(
-                    QUANTITY_STEP, rounding=ROUND_DOWN
+            if auction:
+                if use_auction and (symbol, window.session_id, "entry") not in self.attempted:
+                    self._submit(
+                        symbol, "buy", whole, "cls", price, now, "entry", window, auction_limit
+                    )
+                continue
+            # Fractional stocks enter here; so does a whole-share stock whose on-close
+            # order failed or was never sent (a pending on-close order is skipped above).
+            limit = (price * DAY_LIMIT).quantize(Decimal("0.01"), ROUND_DOWN)
+            quantity = (cash / limit).quantize(QUANTITY_STEP, rounding=ROUND_DOWN)
+            if quantity * limit >= MINIMUM_NOTIONAL:
+                self._submit(
+                    symbol, "buy", quantity, "day", price, now, "entry-late", window, limit
                 )
-                if quantity * price >= MINIMUM_NOTIONAL:
-                    self._submit(symbol, "buy", quantity, "day", price, now, "entry-late", window)
+
+    # Main loop --------------------------------------------------------------
+    def _tick(self, state):
+        now = self.clock()
+        busy = any(self.broker.book(s).pending for s in self.config.symbols)
+        if now - state["poll"] >= (5 if busy else 60) * NS:
+            self._poll()
+            state["poll"] = now
+        if now - state["reconcile"] >= MINUTE:
+            self.broker.refresh()
+            self._reconcile()
+            state["reconcile"] = now
+        window = self._window(now)
+        if window and window.session_id != self.session_id:
+            self.session_id = window.session_id
+            self.broker.start_session()
+        if window:
+            self._exits(window, self.clock())
+            self._entries(window, self.clock())
+        if (
+            self.calendar_source
+            and (window is None or now < window.open_ns - PRE_OPEN_EXIT[0] - MINUTE)
+            and now >= state["calendar"]
+        ):
+            try:
+                self.windows = self.calendar_source()
+                state["calendar"] = now + 6 * 3600 * NS
+            except (RuntimeError, OSError, KeyError, ValueError) as error:
+                self._quality(f"calendar: {error}")
+                state["calendar"] = now + MINUTE  # keep the old calendar; retry soon
+        return window
 
     async def run(self, *, until_ns=None):
         for symbol, execution in self.broker.recovered_fills:
             self._record(symbol, execution)
-        last_poll = last_refresh = 0
+        state = {"poll": 0, "reconcile": 0, "calendar": self.clock() + 6 * 3600 * NS}
         try:
             while until_ns is None or self.clock() < until_ns:
                 now = self.clock()
-                if now - last_refresh >= MINUTE:
-                    # Poll first so fills that already happened are in the ledger.
-                    for symbol, execution in await asyncio.to_thread(self.broker.poll):
-                        self._record(symbol, execution)
-                    await asyncio.to_thread(self.broker.refresh)
-                    await asyncio.to_thread(self.broker.reconcile)
-                    self.broker.save()
-                    last_refresh = now
-                window = self._window(now)
-                if window and window.session_id != self.session_id:
-                    self.session_id = window.session_id
-                    self.broker.start_session()
-                if window:
-                    self._exits(window, self.clock())
-                    self._entries(window, self.clock())
-                busy = any(self.broker.book(s).pending for s in self.config.symbols)
-                if now - last_poll >= (5 if busy else 60) * NS:
-                    for symbol, execution in await asyncio.to_thread(self.broker.poll):
-                        self._record(symbol, execution)
-                    last_poll = now
-                if (
-                    self.calendar_source
-                    and (window is None or now < window.open_ns - PRE_OPEN_EXIT[0])
-                    and now - self.calendar_ns > 6 * 3600 * NS
-                ):
-                    self.windows = await asyncio.to_thread(self.calendar_source)
-                    self.calendar_ns = now
+                # Broker calls run on this thread: cancelling the task can never leave a
+                # request mutating the ledger while shutdown runs.
+                try:
+                    window = self._tick(state)
+                except BrokerHTTPError as error:
+                    self._quality(f"broker HTTP {error.status}; retrying")
+                    await self.sleep(ERROR_BACKOFF_SECONDS)
+                    continue
+                except (OSError, ValueError) as error:
+                    self._quality(f"error: {error}; retrying")
+                    await self.sleep(ERROR_BACKOFF_SECONDS)
+                    continue
+                except RuntimeError as error:
+                    if "mismatch" in str(error) or "unexpected broker" in str(error):
+                        raise  # confirmed reconciliation failure: stop for a human
+                    self._quality(f"error: {error}; retrying")
+                    await self.sleep(ERROR_BACKOFF_SECONDS)
+                    continue
                 await self.sleep(1.0 if window and self._near(window, now) else 10.0)
         finally:
             await self.shutdown()
@@ -362,11 +488,13 @@ class OvernightRunner:
     async def shutdown(self):
         """Cancel open orders; positions stay and are sold at the next open after a restart."""
         try:
-            await asyncio.to_thread(self.broker.cancel_all)
+            for symbol in self.config.symbols:
+                try:
+                    self.broker.book(symbol).cancel()
+                except (RuntimeError, OSError) as error:
+                    self._quality(f"cancel: {error}", [symbol])
             for _ in range(10):
-                fills = await asyncio.to_thread(self.broker.poll)
-                for symbol, execution in fills:
-                    self._record(symbol, execution)
+                self._poll()
                 if not any(self.broker.book(s).pending for s in self.config.symbols):
                     break
                 await self.sleep(0.5)

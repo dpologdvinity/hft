@@ -54,6 +54,18 @@ class AccountGuard:
         self.peak = max(self.peak, self.day_start)
         self.halted = self.latched
 
+    def to_state(self):
+        return {
+            "day_start": str(self.day_start),
+            "peak": str(self.peak),
+            "latched": self.latched,
+            "halted": self.halted,
+        }
+
+    def restore(self, state):
+        self.day_start, self.peak = decimal(state["day_start"]), decimal(state["peak"])
+        self.latched, self.halted = state["latched"], state["halted"]
+
     def observe(self, equity: Decimal) -> str | None:
         equity = decimal(equity)
         self.peak = max(self.peak, equity)

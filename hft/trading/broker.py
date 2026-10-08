@@ -89,6 +89,8 @@ class PortfolioBroker:
                     raise ValueError(f"{symbol} must be an active, tradable, fractionable stock")
             state = self.store.load()
             self.books = {}
+            # Run-level state owned by the runner (e.g. the account guard), saved with books.
+            self.extra = dict(state.get("extra", {})) if state else {}
             if state:
                 if state["identity"] != identity:
                     raise ValueError("run identity changed; start a new run name")
@@ -183,6 +185,7 @@ class PortfolioBroker:
                 "mode": self.client.mode,
                 "identity": self.identity,
                 "remote_initial_cash": str(self.remote_initial_cash),
+                "extra": getattr(self, "extra", {}),
                 "books": {
                     s: {
                         "account": b.account.to_state(),

@@ -302,7 +302,11 @@ def main(argv=None):
     try:
         result = _handle(args)
         if result is not None:
-            print(json.dumps(result, indent=2, allow_nan=False, default=str))
+            print(
+                result
+                if isinstance(result, str)
+                else json.dumps(result, indent=2, allow_nan=False, default=str)
+            )
         return 0
     except (ValueError, RuntimeError, OSError, ImportError, KeyError, TypeError) as error:
         print(f"error: {error}", file=sys.stderr)

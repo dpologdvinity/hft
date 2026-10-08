@@ -53,7 +53,9 @@ def default_name(budgets, strategy):
     return "-".join(budgets)[:40] + "-" + strategy.name.replace(":", "")
 
 
-def run_identity(budgets, strategy, *, daily_loss, max_drawdown, engine, engine_version, feed):
+def run_identity(
+    budgets, strategy, *, daily_loss, max_drawdown, max_spread_bps, engine, engine_version, feed
+):
     bundle = None
     if strategy.bundle is not None:
         bundle = hashlib.sha256((Path(strategy.bundle) / "model.onnx").read_bytes()).hexdigest()
@@ -62,6 +64,7 @@ def run_identity(budgets, strategy, *, daily_loss, max_drawdown, engine, engine_
         "strategy": [strategy.name, strategy.version, bundle],
         "engine": [engine, engine_version],
         "risk": asdict(budget_risk_config(daily_loss, max_drawdown)),
+        "max_entry_spread_bps": str(max_spread_bps),
         "costs": asdict(Costs()),
         "latency_ms": 75,
         "bar_seconds": 5,
@@ -109,6 +112,7 @@ def handle_trade(args):
         strategy,
         daily_loss=args.daily_loss,
         max_drawdown=args.max_drawdown,
+        max_spread_bps=args.max_spread_bps,
         engine=probe.implementation,
         engine_version=probe.version,
         feed="iex",
@@ -133,7 +137,9 @@ def handle_trade(args):
         client,
         budgets,
         Costs(),
-        lambda s: budget_gateway(budgets[s], args.daily_loss, args.max_drawdown),
+        lambda s: budget_gateway(
+            budgets[s], args.daily_loss, args.max_drawdown, args.max_spread_bps
+        ),
         run_dir=state_dir,
         identity=identity,
         clock=time.time_ns,
@@ -190,7 +196,10 @@ def handle_replay(args):
     for symbol, budget in budgets.items():
         manifest = ensure_session(symbol, day, download=_read_only_download)
         print(f"replaying {symbol} {day} ...", flush=True)
-        rows.append(replay_stock(manifest, budget, strategy, log_dir, engine=args.engine))
+        risk = budget_gateway(budget, args.daily_loss, args.max_drawdown, args.max_spread_bps)
+        rows.append(
+            replay_stock(manifest, budget, strategy, log_dir, engine=args.engine, risk=risk)
+        )
     return format_replay(rows)
 
 

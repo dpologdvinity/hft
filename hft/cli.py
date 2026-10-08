@@ -80,6 +80,12 @@ def _parser():
     trade.add_argument("--name", help="run name (state and journals are kept per run)")
     trade.add_argument("--daily-loss", type=float, default=0.02)
     trade.add_argument("--max-drawdown", type=float, default=0.05)
+    trade.add_argument(
+        "--max-spread-bps",
+        type=float,
+        default=10.0,
+        help="skip entries while the bid-ask spread is wider than this (exits are never blocked)",
+    )
     trade.add_argument("--engine", choices=["auto", "python", "cpp"], default="auto")
     trade.add_argument("--status", action="store_true", help="show runs without trading")
     trade.add_argument(

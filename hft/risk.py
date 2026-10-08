@@ -63,12 +63,21 @@ class RiskDecision:
 
 
 class RiskGateway:
-    def __init__(self, config=None, blackouts=(), *, entry_cap=None):
+    def __init__(self, config=None, blackouts=(), *, entry_cap=None, max_entry_spread_bps=None):
         self.config = config or RiskConfig()
         # Budget runs cap each entry in dollars instead of a fraction of equity.
         self.entry_cap = None if entry_cap is None else decimal(entry_cap)
         if self.entry_cap is not None and (not self.entry_cap.is_finite() or self.entry_cap <= 0):
             raise ValueError("entry cap must be positive")
+        # Thin books post quotes far from the real market; entering there buys a
+        # fake price. Exits are never blocked by spread.
+        self.max_entry_spread = (
+            None if max_entry_spread_bps is None else decimal(max_entry_spread_bps) / 10000
+        )
+        if self.max_entry_spread is not None and (
+            not self.max_entry_spread.is_finite() or self.max_entry_spread <= 0
+        ):
+            raise ValueError("entry spread limit must be positive")
         self.blackouts = tuple(blackouts)
         if any(a >= b for a, b in blackouts):
             raise ValueError("invalid blackout")
@@ -163,6 +172,11 @@ class RiskGateway:
             return RiskDecision(False, "news_blackout")
         if now_ns < self.breaker_until:
             return RiskDecision(False, "volatility_breaker")
+        quote = snapshot.quote
+        if self.max_entry_spread is not None and (
+            quote.ask - quote.bid > quote.mid * self.max_entry_spread
+        ):
+            return RiskDecision(False, "wide_spread")
         limit = (
             self.day_start * decimal(self.config.entry_allocation)
             if self.entry_cap is None

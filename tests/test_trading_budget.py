@@ -50,6 +50,23 @@ def test_entry_cap_replaces_the_fraction_limit_only_when_set():
         RiskGateway(entry_cap=0)
 
 
+def test_wide_spread_blocks_entries_but_never_exits():
+    wide = Quote("w", NOW, NOW, Decimal("99.90"), Decimal("100.10"), Decimal(500), Decimal(500))
+    account = Account(200, Costs(0, 0))
+    snapshot = Snapshot(wide, SESSION, 0, Decimal(200), Decimal(200), Decimal(200), ())
+    buy = make_budget_intent(1, account, wide, LIMITS, NOW, budget=100)
+    assert budget_gateway(200).evaluate(buy, snapshot, NOW).reason == "wide_spread"  # 20 bp
+    assert budget_gateway(200, max_spread_bps=25).evaluate(buy, snapshot, NOW).allowed
+    assert RiskGateway(entry_cap=200).evaluate(buy, snapshot, NOW).allowed  # off unless set
+    assert budget_gateway(200).evaluate(buy, _snapshot(account), NOW).allowed  # 2 bp
+    account.execute(1, 100, 0, NOW)
+    held = Snapshot(wide, SESSION, account.position, Decimal(200), Decimal(200), account.cash, ())
+    sell = make_budget_intent(0, account, wide, LIMITS, NOW, budget=100)
+    assert budget_gateway(200).evaluate(sell, held, NOW).allowed
+    with pytest.raises(ValueError):
+        RiskGateway(max_entry_spread_bps=0)
+
+
 def test_account_guard_daily_loss_resets_and_drawdown_latches():
     guard = AccountGuard(1000, daily_loss=0.02, max_drawdown=0.05)
     guard.start_session(Decimal(1000))

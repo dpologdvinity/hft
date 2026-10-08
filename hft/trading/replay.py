@@ -50,7 +50,7 @@ def ensure_session(symbol, day, data_root=ROOT / "data", download=None):
     return manifest
 
 
-def replay_stock(manifest, budget, strategy, log_dir, *, engine="auto"):
+def replay_stock(manifest, budget, strategy, log_dir, *, engine="auto", risk=None):
     session = load_session(manifest, metadata="execution")
     if session.synthetic or not is_real_executable(session):
         raise ValueError("replay needs real, verified IEX data")
@@ -63,7 +63,7 @@ def replay_stock(manifest, budget, strategy, log_dir, *, engine="auto"):
         None,
         log_path=Path(log_dir) / f"{symbol}-{session.session_id}.jsonl",
         initial_cash=budget,
-        risk=budget_gateway(budget),
+        risk=risk or budget_gateway(budget),
         sizing=SizingConfig(),
         symbol=symbol,
         synthetic=False,

@@ -53,6 +53,7 @@ def test_identity_changes_with_every_input():
     base = {
         "daily_loss": 0.02,
         "max_drawdown": 0.05,
+        "max_spread_bps": 10.0,
         "engine": "cpp",
         "engine_version": "0.1.0",
         "feed": "iex",
@@ -65,8 +66,9 @@ def test_identity_changes_with_every_input():
         run_identity(budgets, parse_strategy("ema-crossover"), **base),
         run_identity(budgets, strategy, **{**base, "daily_loss": 0.03}),
         run_identity(budgets, strategy, **{**base, "engine": "python"}),
+        run_identity(budgets, strategy, **{**base, "max_spread_bps": 20.0}),
     ]
-    assert len({reference, *variants}) == 5
+    assert len({reference, *variants}) == 6
 
 
 def test_status_reads_state_and_journal_tail(tmp_path):

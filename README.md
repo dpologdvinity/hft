@@ -126,15 +126,23 @@ export ALPACA_API_KEY=... ALPACA_SECRET_KEY=...              # free market data
 export ALPACA_PAPER_API_KEY=... ALPACA_PAPER_SECRET_KEY=...  # paper account
 python -m hft trade --paper --symbols NVDA=200 AAPL=100 MSFT=100 --strategy ema-crossover
 python -m hft trade --status                                  # per-stock position and profit
+python -m hft trade --replay 2026-10-07 --symbols NVDA=100 AAPL=100   # rerun a past day
 ```
+
+`--replay` downloads that day's IEX quotes once (read-only) and runs each stock through
+the same engine, strategy, sizing and risk limits with simulated quote-level fills; it
+shows what the bot would have done, not broker results.
 
 Strategies: `ema-crossover`, `hold-day`, or `model:<bundle>` (a trained model, for
 the stock it was trained on). The run waits for the open, trades, goes flat before
 the close and repeats daily; Ctrl-C cancels orders, sells holdings and reconciles.
 Each stock has its own ledger and order book on one dedicated paper account; feed
 silence or a disconnect blocks new entries instead of stopping the run, and daily
-loss (2%) and drawdown (5%) limits apply per stock and across the account. Real
-money is refused until a strategy passes research and 30 paper sessions.
+loss (2%) and drawdown (5%) limits apply per stock and across the account. New
+entries wait while the IEX bid-ask spread is wider than 10 bp (`--max-spread-bps`):
+thin IEX books post quotes far from the real market, so prefer liquid names such as
+NVDA or AAPL (about 2 bp). Exits are never blocked by spread. Real money is refused
+until a strategy passes research and 30 paper sessions.
 
 ## Research workflow
 

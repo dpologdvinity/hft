@@ -17,8 +17,19 @@ def budget_risk_config(daily_loss=0.02, max_drawdown=0.05) -> RiskConfig:
     )
 
 
-def budget_gateway(budget, daily_loss=0.02, max_drawdown=0.05) -> RiskGateway:
-    return RiskGateway(budget_risk_config(daily_loss, max_drawdown), entry_cap=budget)
+# NVDA/AAPL IEX books sit near 2 bp; thin books (MSFT on IEX: 26-71 bp) post
+# quotes far from the real market.
+MAX_ENTRY_SPREAD_BPS = 10
+
+
+def budget_gateway(
+    budget, daily_loss=0.02, max_drawdown=0.05, max_spread_bps=MAX_ENTRY_SPREAD_BPS
+) -> RiskGateway:
+    return RiskGateway(
+        budget_risk_config(daily_loss, max_drawdown),
+        entry_cap=budget,
+        max_entry_spread_bps=max_spread_bps,
+    )
 
 
 def budget_intent_factory(budget):

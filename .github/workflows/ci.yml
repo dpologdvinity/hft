@@ -53,7 +53,7 @@ jobs:
       - run: ctest --test-dir cpp/build --output-on-failure
       - run: python -m pip install -r requirements-train.txt
       - run: python -m pip install --no-deps -e . ./cpp
-      - run: python -m pytest -q tests/test_hftcore.py
+      - run: python -m pytest -q tests/test_hftcore.py tests/test_engine_parity.py
         env:
           HFT_REQUIRE_HFTCORE: "1"
 

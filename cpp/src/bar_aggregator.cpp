@@ -1,5 +1,7 @@
 #include "hftcore/bar_aggregator.hpp"
 
+#include "hftcore/numeric.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -163,9 +165,10 @@ std::vector<Bar> BarAggregator::advance_to(std::int64_t now_ns) {
           if (t.price < bar.low) bar.low = t.price;
         }
       }
-      double volume = 0, notional = 0;
-      for (const auto& t : eligible) volume += t.size;
-      for (const auto& t : eligible) notional += t.price * t.size;
+      PySum volume_sum, notional_sum;
+      for (const auto& t : eligible) volume_sum.add(t.size);
+      for (const auto& t : eligible) notional_sum.add(t.price * t.size);
+      const double volume = volume_sum.value(), notional = notional_sum.value();
       bar.volume = volume;
       bar.vwap = volume != 0 ? notional / volume : *last_price_;
       bar.bid = quote->bid;

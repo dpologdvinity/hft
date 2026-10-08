@@ -18,3 +18,14 @@ TEST_CASE("shortest repr round-trips") {
   REQUIRE(hftcore::shortest_repr(0.1, buffer) == "0.1");
   REQUIRE(hftcore::shortest_repr(150.25, buffer) == "150.25");
 }
+
+#include "hftcore/numeric.hpp"
+
+TEST_CASE("PySum matches CPython's compensated float sum") {
+  hftcore::PySum s;
+  for (double x : {1e16, 1.0, -1e16}) s.add(x);
+  REQUIRE(s.value() == 1.0);  // a naive running sum gives 0.0
+  hftcore::PySum t;
+  for (double x : {0.1, 0.1, 0.1}) t.add(x);
+  REQUIRE(t.value() == 0.30000000000000004);
+}

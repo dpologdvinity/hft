@@ -379,3 +379,50 @@ def test_native_frames_require_the_cpp_engine(tmp_path):
             TradeRunner(config, broker, [SESSION], clock=clock, sleep=clock.sleep)
     finally:
         broker.close()
+
+
+def test_a_brief_backlog_restarts_warmup_instead_of_halting_the_day(tmp_path, monkeypatch):
+    monkeypatch.setattr("hft.runtime.time.monotonic", lambda: 0.0)
+    clock = Clock(START)
+    exchange = Exchange(clock)
+    events = stream_factory(clock, 10**15)
+
+    async def stalled(symbols, *, feed):
+        async for kind, message, arrival in events(symbols, feed=feed):
+            if kind == "event" and START + 20 * NS <= arrival < START + 22 * NS:
+                stale = arrival - 2 * NS  # delivered two seconds late, like a stalled loop
+                yield kind, {**message, "arrival_ns": stale}, stale
+            else:
+                yield kind, message, arrival
+
+    budgets = {"NVDA": 300}
+    broker = PortfolioBroker(
+        exchange,
+        budgets,
+        Costs(0, 0),
+        lambda s: budget_gateway(300),
+        run_dir=tmp_path / "state",
+        identity="run",
+        clock=clock,
+    )
+    config = TradeConfig(
+        "test",
+        ("NVDA",),
+        budgets,
+        parse_strategy("hold-day"),
+        log_dir=tmp_path / "logs",
+        run_dir=tmp_path / "state",
+    )
+    runner = TradeRunner(
+        config, broker, [SESSION], stream_factory=stalled, clock=clock, sleep=clock.sleep
+    )
+    try:
+        asyncio.run(runner.run(until_ns=START + 420 * NS))
+    finally:
+        broker.close()
+    rows = [
+        json.loads(r)
+        for r in next((tmp_path / "logs").glob("NVDA-*.jsonl")).read_text().splitlines()
+    ]
+    assert [r.get("reason") for r in rows].count("processing_backlog") == 1
+    assert ("NVDA", "buy") in exchange.posts  # warmed up again and traded the same day

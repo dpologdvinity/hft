@@ -173,7 +173,7 @@ fraction-based `RiskConfig` / `SizingConfig` defaults and validation (10% entry,
 | Unknown order after timeout | Lookup by the same client order ID (unchanged). |
 | Reconciliation mismatch | Fail closed: stop trading, keep state and journals (unchanged). |
 | Crash or reboot | Rerun the same command; it reconciles before trading. |
-| Event backlog > 1 s | Existing `runtime_gap` behavior: drop, reset history, halt entries for the session. |
+| Event backlog > 1 s | Drop stale events, journal one gap, restart warmup from fresh bars (entries blocked until ready). Amended 2026-10-08: the first paper session lost NVDA for the whole day to a single stall at the open under the original halt-for-the-session rule. |
 
 ### Journals, status and dashboard
 

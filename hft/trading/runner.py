@@ -66,6 +66,7 @@ class TradeRunner:
         self.started_ns = clock()
         self.queued = {s: [] for s in config.symbols}
         self.silent = set()
+        self.lagging = set()  # stocks dropping stale events until a fresh one arrives
         self.guard = AccountGuard(
             sum((Decimal(str(b)) for b in config.budgets.values()), Decimal(0)),
             config.daily_loss,
@@ -147,6 +148,7 @@ class TradeRunner:
             engine.start_session(session, now)
         self.guard.start_session(self._equity())
         self.silent.clear()
+        self.lagging.clear()
 
     async def _end_session(self):
         for symbol, engine in self.engines.items():
@@ -171,6 +173,7 @@ class TradeRunner:
             self._backlog(event["S"], now)
             return
         self.silent.discard(event["S"])
+        self.lagging.discard(event["S"])
         engine.on_event(event, arrival)
 
     def _route_frame(self, raw, arrival, now):
@@ -201,14 +204,19 @@ class TradeRunner:
         for symbol, engine in self.engines.items():
             if engine.market.last_event_ns != before[symbol]:
                 self.silent.discard(symbol)
+                self.lagging.discard(symbol)
 
     def _backlog(self, symbol, now):
+        """Events more than 1 s old are dropped and the stock warms up again from fresh
+        bars. Entries stay blocked until it is ready; the day is not halted, because one
+        brief stall (e.g. the opening burst) would otherwise end that stock's session."""
         engine = self.engines[symbol]
-        engine.market.reset_history()
+        engine.market.mark_gap(now)
         engine.session_complete = False
         self.queued[symbol].clear()
-        engine.risk.halted = "runtime_gap"
-        engine.log.write("gap", event_ns=now, reason="processing_backlog")
+        if symbol not in self.lagging:
+            self.lagging.add(symbol)
+            engine.log.write("gap", event_ns=now, reason="processing_backlog")
 
     def _check_silence(self, now):
         for symbol, engine in self.engines.items():

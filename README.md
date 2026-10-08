@@ -33,7 +33,7 @@ trade history, not strategy returns; the $500 allocation is simulated.
   paired block bootstrap). Final-test dates are durably reserved before their prices
   can be opened, and regression tests fail if the loader's preflight or read stages touch a
   reserved partition.
-- **C++ market-data engine (in progress).** `hftcore` (C++20, pybind11, CMake,
+- **C++ market-data and decision engine.** `hftcore` (C++20, pybind11, CMake,
   Catch2, CI) ports the causal 5-second bar aggregator and the market engine: decision
   history, feed-gap and warmup rules, the 10 market features and rule strategies.
   Parity tests require bit-identical output to the Python reference, down to CPython

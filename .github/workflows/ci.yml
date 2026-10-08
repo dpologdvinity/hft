@@ -59,6 +59,25 @@ jobs:
           HFT_REQUIRE_HFTCORE: "1"
           HFT_ENGINE: cpp
 
+  cpp-sanitize:
+    name: C++ tests under AddressSanitizer and UBSan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install cmake ninja
+      - run: >-
+          cmake -S cpp -B cpp/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DHFTCORE_SANITIZE=ON -DHFTCORE_BUILD_BENCH=OFF
+      - run: cmake --build cpp/build -j2
+      - run: ctest --test-dir cpp/build --output-on-failure
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+
   frontend:
     name: Dashboard tests and build
     runs-on: ubuntu-latest

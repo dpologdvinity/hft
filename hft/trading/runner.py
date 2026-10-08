@@ -4,6 +4,10 @@ Per stock: a `PaperEngine` (market engine, account ledger, budget risk gateway)
 whose orders go to that stock's `SymbolBook`. Account-wide: one market-data
 stream, an `AccountGuard`, polling, reconciliation and session boundaries.
 Feed silence or a disconnect blocks entries instead of stopping the run.
+
+With `frames="native"` the stream hands raw JSON frames to `hftcore.FrameRouter`,
+which parses them with simdjson and feeds every stock's C++ market engine; updates
+and quotes are then applied in message order, exactly as the per-message path does.
 """
 
 import asyncio
@@ -13,6 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from ..calendar import session_at
+from ..data import Quote
 from ..market_engine import make_market_engine
 from ..paper import PaperEngine
 from ..runtime import _flatten
@@ -38,6 +43,7 @@ class TradeConfig:
     max_drawdown: float = 0.05
     feed: str = "iex"
     engine: str = "auto"
+    frames: str = "python"  # "native": parse stream frames in C++
 
 
 class TradeRunner:
@@ -68,6 +74,17 @@ class TradeRunner:
         self.engines = {}
         for symbol in config.symbols:
             self.engines[symbol] = self._engine(symbol, policy_factory)
+        self.router, self.malformed = None, 0
+        if config.frames not in ("python", "native"):
+            raise ValueError("frames must be python or native")
+        if config.frames == "native":
+            if any(e.market.implementation != "cpp" for e in self.engines.values()):
+                raise ValueError("native frame parsing needs the C++ engine (hftcore)")
+            import hftcore
+
+            self.router = hftcore.FrameRouter()
+            for engine in self.engines.values():
+                self.router.add(engine.market.native)
 
     def _engine(self, symbol, policy_factory):
         book = self.broker.book(symbol)
@@ -103,6 +120,7 @@ class TradeRunner:
                 "strategy": strategy.name,
                 "strategy_version": strategy.version,
                 "engine": market.implementation,
+                "frames": self.config.frames,
                 "account_id": self.broker.account_id,
             },
             submit_callback=submit,
@@ -150,14 +168,47 @@ class TradeRunner:
             return
         arrival = event.get("arrival_ns") or now
         if now - arrival > BACKLOG_NS:
-            engine.market.reset_history()
-            engine.session_complete = False
-            self.queued[event["S"]].clear()
-            engine.risk.halted = "runtime_gap"
-            engine.log.write("gap", event_ns=now, reason="processing_backlog")
+            self._backlog(event["S"], now)
             return
         self.silent.discard(event["S"])
         engine.on_event(event, arrival)
+
+    def _route_frame(self, raw, arrival, now):
+        if not any(engine.session for engine in self.engines.values()):
+            return
+        if now - arrival > BACKLOG_NS:
+            for symbol in self.engines:
+                self._backlog(symbol, now)  # the frame's symbols are unknown until parsed
+            return
+        before = {s: e.market.last_event_ns for s, e in self.engines.items()}
+        updates, quotes, malformed = self.router.on_frame(raw, arrival)
+        self.malformed += malformed
+        items = [(message, 0, symbol, row) for symbol, row, message in updates]
+        items += [(q[-1], 1, q[0], q[1:-1]) for q in quotes]  # a message's quote follows its bars
+        for _, is_quote, symbol, value in sorted(items, key=lambda item: item[:2]):
+            engine = self.engines[symbol]
+            if is_quote:
+                event_ns, bid, ask, bid_size, ask_size = value
+                quote = Quote(
+                    f"{symbol}:{event_ns}",  # broker fills never match on quote identity
+                    event_ns,
+                    arrival,
+                    *(Decimal(str(v)) for v in (bid, ask, bid_size, ask_size)),
+                )
+                engine.on_stream_quote(quote, arrival)
+            else:
+                engine.on_market_updates(engine.market.convert([value]), arrival)
+        for symbol, engine in self.engines.items():
+            if engine.market.last_event_ns != before[symbol]:
+                self.silent.discard(symbol)
+
+    def _backlog(self, symbol, now):
+        engine = self.engines[symbol]
+        engine.market.reset_history()
+        engine.session_complete = False
+        self.queued[symbol].clear()
+        engine.risk.halted = "runtime_gap"
+        engine.log.write("gap", event_ns=now, reason="processing_backlog")
 
     def _check_silence(self, now):
         for symbol, engine in self.engines.items():
@@ -201,13 +252,16 @@ class TradeRunner:
     async def run(self, *, until_ns=None):
         queue = asyncio.Queue(maxsize=4096)
 
+        native = self.router is not None
+        options = {"raw": True} if native else {}
+
         async def receive():
             async for kind, message, arrival in self.stream_factory(
-                list(self.config.symbols), feed=self.config.feed
+                list(self.config.symbols), feed=self.config.feed, **options
             ):
-                if kind == "event":
+                if kind in ("event", "frame"):
                     try:
-                        queue.put_nowait(message)
+                        queue.put_nowait((message, arrival) if native else message)
                     except asyncio.QueueFull:
                         raise RuntimeError("market queue overflow; stop and reconcile") from None
                 else:
@@ -234,7 +288,10 @@ class TradeRunner:
                     self._start_session(session, now)
                     active = session
                 while not queue.empty():
-                    self._route(queue.get_nowait(), self.clock())
+                    if native:
+                        self._route_frame(*queue.get_nowait(), self.clock())
+                    else:
+                        self._route(queue.get_nowait(), self.clock())
                 now = self.clock()
                 if active:
                     self._check_silence(now)

@@ -403,12 +403,12 @@ PYBIND11_MODULE(hftcore, m) {
               throw py::value_error(error.what());
             }
             py::list updates, quotes;
-            for (const auto& [symbol, update] : result.updates) {
-              updates.append(py::make_tuple(symbol, update_object(update)));
+            for (const auto& u : result.updates) {
+              updates.append(py::make_tuple(u.symbol, update_object(u.update), u.message));
             }
             for (const auto& q : result.quotes) {
               quotes.append(py::make_tuple(q.symbol, q.quote.event_ns, q.quote.bid, q.quote.ask,
-                                           q.quote.bid_size, q.quote.ask_size));
+                                           q.quote.bid_size, q.quote.ask_size, q.message));
             }
             return py::make_tuple(updates, quotes, result.malformed);
           },

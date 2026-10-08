@@ -2,6 +2,8 @@ import asyncio
 import json
 from decimal import Decimal
 
+import pytest
+
 from hft.account import Costs
 from hft.calendar import SessionWindow
 from hft.data import NS
@@ -237,3 +239,143 @@ def test_runner_trades_consecutive_sessions_and_is_flat_between_them(tmp_path, m
         for r in next((tmp_path / "logs").glob("NVDA-*.jsonl")).read_text().splitlines()
     ]
     assert [r["date"] for r in rows if r["event"] == "session"] == ["2025-01-06", "2025-01-07"]
+
+
+def alpaca_frames(clock, symbols):
+    """Alpaca-shaped frames every 0.7 s; each holds several messages per stock that
+    regularly straddle a 5-second bar boundary, so message order matters."""
+    import math
+    from datetime import UTC, datetime
+
+    def stamp(ns):
+        text = datetime.fromtimestamp(ns // NS, UTC).strftime("%Y-%m-%dT%H:%M:%S")
+        return f"{text}.{ns % NS:09d}Z"
+
+    async def frames():
+        k = 0
+        while True:
+            t = START + k * 700_000_000
+            while clock() < t:
+                await asyncio.sleep(0)
+            frame = [{"T": "subscription", "quotes": symbols}] if k == 0 else []
+            for j, offset in enumerate((650, 300, 50)):
+                event_ns = t - offset * 1_000_000
+                for n, symbol in enumerate(symbols):
+                    price = round(100 + 0.4 * math.sin((3 * k + j) / (40 + 7 * n)), 2)
+                    frame.append(
+                        {
+                            "T": "q",
+                            "S": symbol,
+                            "t": stamp(event_ns),
+                            "bp": price - 0.01,
+                            "ap": price + 0.01,
+                            "bs": 3,
+                            "as": 4,
+                        }
+                    )
+                    frame.append(
+                        {
+                            "T": "t",
+                            "S": symbol,
+                            "t": stamp(event_ns + 1),
+                            "p": price,
+                            "s": 10,
+                            "i": k * 10 + j,
+                            "c": ["@"],
+                        }
+                    )
+            yield frame, t + 50_000
+            k += 1
+
+    return frames
+
+
+def _run_with_frames(tmp_path, frames_mode):
+    clock = Clock(START)
+    exchange = Exchange(clock)
+    budgets = {"NVDA": 300, "AAPL": 200}
+    source = alpaca_frames(clock, list(budgets))
+
+    async def stream(symbols, *, feed, raw=False):
+        yield "connected", None, clock()
+        async for frame, arrival in source():
+            if raw:
+                yield "frame", json.dumps(frame).encode(), arrival
+            else:
+                for message in frame:
+                    if message["T"] in ("q", "t"):
+                        yield "event", {**message, "arrival_ns": arrival}, arrival
+
+    broker = PortfolioBroker(
+        exchange,
+        budgets,
+        Costs(0, 0),
+        lambda s: budget_gateway(budgets[s]),
+        run_dir=tmp_path / "state",
+        identity="run",
+        clock=clock,
+    )
+    config = TradeConfig(
+        "test",
+        tuple(budgets),
+        budgets,
+        parse_strategy("ema-crossover"),
+        log_dir=tmp_path / "logs",
+        run_dir=tmp_path / "state",
+        engine="cpp",
+        frames=frames_mode,
+    )
+    runner = TradeRunner(
+        config, broker, [SESSION], stream_factory=stream, clock=clock, sleep=clock.sleep
+    )
+    try:
+        summary = asyncio.run(runner.run(until_ns=START + 900 * NS))
+    finally:
+        broker.close()
+    journals = {}
+    for path in sorted((tmp_path / "logs").glob("*.jsonl")):
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        journals[path.name.split("-")[0]] = [
+            (r["event"], r.get("event_ns"), r.get("reason"), r.get("action"), r.get("equity"))
+            for r in rows
+        ]
+    return exchange.posts, summary, journals
+
+
+def test_native_frames_trade_exactly_like_the_python_stream_path(tmp_path, monkeypatch):
+    pytest.importorskip("hftcore")
+    monkeypatch.setattr("hft.runtime.time.monotonic", lambda: 0.0)
+    expected = _run_with_frames(tmp_path / "python", "python")
+    actual = _run_with_frames(tmp_path / "native", "native")
+    posts, _, journals = expected
+    assert ("NVDA", "buy") in posts and ("AAPL", "buy") in posts  # decisions happened
+    assert sum(1 for row in journals["NVDA"] if row[0] == "decision") > 50
+    assert actual == expected
+
+
+def test_native_frames_require_the_cpp_engine(tmp_path):
+    clock = Clock(START)
+    broker = PortfolioBroker(
+        Exchange(clock),
+        {"NVDA": 300},
+        Costs(0, 0),
+        lambda s: budget_gateway(300),
+        run_dir=tmp_path / "state",
+        identity="run",
+        clock=clock,
+    )
+    config = TradeConfig(
+        "test",
+        ("NVDA",),
+        {"NVDA": 300},
+        parse_strategy("ema-crossover"),
+        log_dir=tmp_path / "logs",
+        run_dir=tmp_path / "state",
+        engine="python",
+        frames="native",
+    )
+    try:
+        with pytest.raises(ValueError, match="C\\+\\+ engine"):
+            TradeRunner(config, broker, [SESSION], clock=clock, sleep=clock.sleep)
+    finally:
+        broker.close()

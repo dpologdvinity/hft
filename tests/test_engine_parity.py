@@ -263,17 +263,15 @@ def test_frame_router_matches_the_python_stream_path(hftcore):
                     expected.append(_comparable(u))
         updates, quotes, bad = router.on_frame(raw, arrival)
         malformed -= bad
-        for symbol, row in updates:
+        for symbol, row, message in updates:
             assert symbol == "AAA"
+            assert messages[message].get("S") == "AAA"
             actual += [_comparable(u) for u in native._convert([row])]
-        for _, event_ns, bid, ask, bid_size, ask_size in quotes:
+        for _, event_ns, bid, ask, bid_size, ask_size, message in quotes:
             from hft.feed import parse_timestamp, quote_from_event
 
-            source = next(
-                m
-                for m in messages
-                if isinstance(m, dict) and m.get("T") == "q" and m.get("S") == "AAA"
-            )
+            source = messages[message]
+            assert source.get("T") == "q" and source.get("S") == "AAA"
             reference = quote_from_event(source, arrival)
             assert event_ns == parse_timestamp(source["t"])
             assert (bid, ask, bid_size, ask_size) == (

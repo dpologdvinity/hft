@@ -13,13 +13,22 @@
 
 namespace hftcore {
 
+// `message` is the index of the source message in the frame, so callers can
+// interleave updates and quotes in arrival order, as the per-message path does.
+struct RoutedUpdate {
+  std::string symbol;
+  Update update;
+  int message;
+};
+
 struct ParsedQuote {
   std::string symbol;
   Quote quote;
+  int message;
 };
 
 struct FrameResult {
-  std::vector<std::pair<std::string, Update>> updates;
+  std::vector<RoutedUpdate> updates;
   std::vector<ParsedQuote> quotes;  // for the Python Decimal quote path
   int malformed = 0;
 };

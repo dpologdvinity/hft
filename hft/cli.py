@@ -87,6 +87,12 @@ def _parser():
         help="skip entries while the bid-ask spread is wider than this (exits are never blocked)",
     )
     trade.add_argument("--engine", choices=["auto", "python", "cpp"], default="auto")
+    trade.add_argument(
+        "--frames",
+        choices=["python", "native"],
+        default="python",
+        help="native: parse market-data frames in C++ (needs the C++ engine)",
+    )
     trade.add_argument("--status", action="store_true", help="show runs without trading")
     trade.add_argument(
         "--replay", metavar="YYYY-MM-DD", help="simulate a past day instead of live paper trading"

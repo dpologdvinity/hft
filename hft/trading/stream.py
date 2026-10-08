@@ -37,12 +37,16 @@ async def stream_events(
     backoff=BACKOFF,
     stats=None,
     recv_timeout=30,
+    raw=False,
 ):
     """Yield ("connected"|"disconnected", None, ns) and ("event", message, arrival_ns).
 
     Control messages and unsubscribed symbols are skipped; malformed frames are
     counted in `stats.malformed` and skipped. Authentication errors raise
     `StreamAuthError`; any other failure reconnects after the next backoff delay.
+    With `raw=True` data frames are yielded unparsed as ("frame", bytes, arrival_ns)
+    for `hftcore.FrameRouter`; only frames mentioning "error" are parsed here, so
+    stream errors still reconnect.
     """
     symbols = list(dict.fromkeys(symbols))
     if not symbols or len(symbols) > MAX_SYMBOLS:
@@ -53,7 +57,7 @@ async def stream_events(
     if not key or not secret:
         raise ValueError("ALPACA_API_KEY and ALPACA_SECRET_KEY are required")
     stats = stats if stats is not None else StreamStats()
-    wanted = set(symbols)
+    wanted, raw_frames = set(symbols), raw
     attempt = 0
     while True:
         connected = False
@@ -69,6 +73,12 @@ async def stream_events(
                 while True:
                     raw = await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
                     arrival = clock()
+                    if raw_frames:
+                        data = raw.encode() if isinstance(raw, str) else bytes(raw)
+                        if b"error" in data:
+                            _raise_stream_error(data)
+                        yield "frame", data, arrival
+                        continue
                     try:
                         messages = json.loads(raw)
                         if not isinstance(messages, list):
@@ -98,6 +108,16 @@ async def stream_events(
         stats.reconnects += 1
         await sleep(backoff[min(attempt, len(backoff) - 1)])
         attempt += 1
+
+
+def _raise_stream_error(data):
+    try:
+        messages = json.loads(data)
+    except ValueError:
+        return  # the frame router counts it as malformed
+    for message in messages if isinstance(messages, list) else ():
+        if isinstance(message, dict) and message.get("T") == "error":
+            raise RuntimeError(f"market data stream error: {message.get('code')}")
 
 
 async def _authenticate(ws):

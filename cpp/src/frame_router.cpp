@@ -91,7 +91,9 @@ FrameResult FrameRouter::on_frame(std::string_view raw, std::int64_t arrival_ns)
     result.malformed = 1;
     return result;
   }
+  int message = -1;
   for (auto element : messages) {
+    ++message;
     od::object object;
     if (element.get_object().get(object)) {
       ++result.malformed;
@@ -125,7 +127,7 @@ FrameResult FrameRouter::on_frame(std::string_view raw, std::int64_t arrival_ns)
       std::optional<std::string_view> id_view;
       if (id) id_view = *id;
       updates = engine.on_quote(q, id_view);
-      result.quotes.push_back({symbol, q});
+      result.quotes.push_back({symbol, q, message});
     } else {
       auto id = identity(object);
       const double price = number(object, "p"), size = number(object, "s");
@@ -134,7 +136,7 @@ FrameResult FrameRouter::on_frame(std::string_view raw, std::int64_t arrival_ns)
       if (id) id_view = *id;
       updates = engine.on_trade(stamp, arrival_ns, price, size, excluded, id_view);
     }
-    for (auto& u : updates) result.updates.emplace_back(symbol, std::move(u));
+    for (auto& u : updates) result.updates.push_back({symbol, std::move(u), message});
   }
   return result;
 }

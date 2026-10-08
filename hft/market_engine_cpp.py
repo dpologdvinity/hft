@@ -92,6 +92,15 @@ class CppMarketEngine:
     def advance_to(self, now_ns):
         return self._convert(self._native.advance_to(now_ns))
 
+    @property
+    def native(self):
+        """The `hftcore.MarketEngine`, for routing raw frames with `hftcore.FrameRouter`."""
+        return self._native
+
+    def convert(self, rows):
+        """Python updates for native update rows, keeping the history mirror current."""
+        return self._convert(rows)
+
     def _convert(self, rows):
         updates = []
         for row in rows:

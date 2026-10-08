@@ -127,6 +127,7 @@ def handle_trade(args):
         daily_loss=args.daily_loss,
         max_drawdown=args.max_drawdown,
         engine=args.engine,
+        frames=args.frames,
     )
     client = AlpacaClient("broker-paper")
 

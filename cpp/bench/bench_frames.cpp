@@ -56,8 +56,8 @@ int main() {
                         std::chrono::steady_clock::now() - t0)
                         .count();
     latencies.push_back(ns);
-    for (const auto& [s, u] : result.updates) {
-      if (const auto* b = std::get_if<BarUpdate>(&u); b && b->ready) ++decisions;
+    for (const auto& routed : result.updates) {
+      if (const auto* b = std::get_if<BarUpdate>(&routed.update); b && b->ready) ++decisions;
     }
   }
   auto pct = [&](double p) {

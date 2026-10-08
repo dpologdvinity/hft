@@ -258,7 +258,14 @@ class PaperEngine:
             self.log.write(
                 "market", event_ns=arrival_ns, payload={**event, "arrival_ns": arrival_ns}
             )
-        updates = self.market.on_event(event, arrival_ns)
+        self.on_market_updates(self.market.on_event(event, arrival_ns), arrival_ns)
+        if event.get("T") == "q":
+            self.on_stream_quote(quote_from_event(event, arrival_ns), arrival_ns)
+
+    def on_market_updates(self, updates, arrival_ns):
+        """Bar and gap updates the market engine produced for one arriving message."""
+        if self.session is None:
+            raise ValueError("start a session before market events")
         self.first_event_ns = self.first_event_ns or arrival_ns
         for update in updates:
             if isinstance(update, GapEvent):
@@ -268,10 +275,11 @@ class PaperEngine:
                     self.execution.cancel()
             else:
                 self.on_bar(update)
-        if event.get("T") == "q":
-            quote = quote_from_event(event, arrival_ns)
-            if self.session.contains(quote.event_ns) and quote.event_ns <= arrival_ns + 250_000_000:
-                self.on_quote(quote, arrival_ns)
+
+    def on_stream_quote(self, quote, arrival_ns):
+        """A streamed quote, after that message's market updates; future quotes are ignored."""
+        if self.session.contains(quote.event_ns) and quote.event_ns <= arrival_ns + 250_000_000:
+            self.on_quote(quote, arrival_ns)
 
     def tick(self, now_ns):
         if self.session is None:

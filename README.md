@@ -40,8 +40,10 @@ trade history, not strategy returns; the $500 allocation is simulated.
   3.12's compensated float sum and no fused multiply-adds. Replaying a real 5.1M-quote
   NVDA session takes **1.3 s instead of 111.5 s (86×)** with identical bars; per-event
   latency is **71 ns p50** and tick-to-decision **12.7 µs p50** after replacing a
-  string hash set with an allocation-free 128-bit identity set. The paper bot and
-  backtests use the C++ engine automatically. Next: native stream parsing
+  string hash set with an allocation-free 128-bit identity set. A simdjson stream
+  parser goes from raw Alpaca JSON to a decision in **~1 µs p50**. The paper bot and
+  backtests use the C++ engine automatically; CI runs every test on it and the C++
+  unit tests under AddressSanitizer/UBSan
   ([design](docs/specs/2026-10-07-paper-trading-runner-design.md), [engine](cpp/README.md)).
 - **Measured performance work.** Profiling showed a memory-budget scan dominated
   session loading. Fixing it and loading an execution-only metadata view made a

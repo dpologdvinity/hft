@@ -146,7 +146,7 @@ spread.
 
 `--strategy overnight-drift` holds overnight instead: it buys near the close and
 sells at the next open. Whole shares go through the closing and opening auctions
-(`cls` limit-on-close and `opg` market-on-open orders, no spread); smaller budgets
+(`cls` market-on-close and `opg` market-on-open orders, no spread); smaller budgets
 use fractional limit orders just before the close and market orders before 09:28,
 which Alpaca fills at the opening price.
 Stopping it cancels open orders and keeps positions, which a restart sells at the

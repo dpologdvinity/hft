@@ -5,8 +5,9 @@ but on free data the spread paid to trade at those times eats the effect
 (docs/multiday-results.md). Auction orders avoid the spread, so this runner trades
 through the auctions wherever Alpaca allows it and is judged forward on paper:
 
-- Entry, 15:45-15:49:30 ET: a limit-on-close order (`time_in_force=cls`) for whole
-  shares when they use at least 90% of the stock's cash. Otherwise, 15:57-15:59 ET:
+- Entry, 15:45-15:49:30 ET: a market-on-close order (`time_in_force=cls`) for whole
+  shares when they use at least 90% of the stock's cash. Limit-on-close would bound
+  the price, but Alpaca paper expired all three sent on 2026-10-08 unfilled. Otherwise, 15:57-15:59 ET:
   a fractional marketable limit order. Alpaca accepts fractional quantities only
   for day orders, and refuses on-close orders after the 15:50 cutoff.
 - Exit, 09:00-09:27:30 ET: a market-on-open order (`opg`) for whole-share
@@ -14,8 +15,10 @@ through the auctions wherever Alpaca allows it and is judged forward on paper:
   received before 09:28 at the official opening price). Any position still held
   after the open is sold with a day market order, retried each minute.
 
-Buys are limit orders sized so that quantity x limit fits the stock's cash, so a
-fill can never overdraw its ledger. Positions are held overnight on purpose (owner
+Day buys are limit orders sized so quantity x limit fits the stock's cash;
+market-on-close buys are sized as if filled 2% above the 15:45 trade, so only a
+larger rise into the close could exceed the cash (the ledger then refuses the fill
+and reconciliation stops the run for review). Positions are held overnight on purpose (owner
 decision, 2026-10-08). Each stock keeps its own ledger and order book on one paper
 account, reusing the `PortfolioBroker` startup checks, durable order state and
 reconciliation. A run that stops overnight keeps its positions; restarting it
@@ -47,7 +50,7 @@ AUCTION_ENTRY = (15 * MINUTE, 10 * MINUTE + 30 * NS)  # before the close
 FRACTIONAL_ENTRY = (3 * MINUTE, 1 * MINUTE)  # before the close
 PRE_OPEN_EXIT = (30 * MINUTE, 2 * MINUTE + 30 * NS)  # before the open
 WHOLE_SHARE_USE = Decimal("0.9")  # whole shares must use this much of the cash
-AUCTION_LIMIT = Decimal("1.02")  # limit-on-close price above the last trade
+AUCTION_CAP = Decimal("1.02")  # on-close buys are sized as if filled 2% above the last trade
 DAY_LIMIT = Decimal("1.01")  # marketable day limit above the last trade
 CASH_USE = Decimal("0.995")
 MAX_PRICE_AGE = 10 * MINUTE  # entries need a recent trade
@@ -71,9 +74,14 @@ class OvernightConfig:
 class OvernightBook(SymbolBook):
     """A stock's book that sends scheduled orders, including auction orders."""
 
-    def submit_order(self, side, quantity, time_in_force, reference_price, now_ns, *, limit=None):
+    def submit_order(
+        self, side, quantity, time_in_force, reference_price, now_ns, *, limit=None, cap=None
+    ):
         quantity, price = decimal(quantity), decimal(reference_price)
         limit = None if limit is None else decimal(limit)
+        # Buys need a price ceiling for the cash checks: the limit, or for market-on-close
+        # orders (Alpaca paper expires limit-on-close orders unfilled) a sizing cap.
+        ceiling = limit if limit is not None else None if cap is None else decimal(cap)
         if self.pending:
             return RiskDecision(False, "order_outstanding")
         if self.rejections >= MAX_REJECTIONS_PER_SESSION and side == "buy":
@@ -89,23 +97,23 @@ class OvernightBook(SymbolBook):
         if side == "sell" and quantity > self.account.position:
             return RiskDecision(False, "inventory_limit")
         if side == "buy":
-            if limit is None or not limit.is_finite() or limit <= 0:
-                return RiskDecision(False, "buy_needs_limit")  # a fill can never overdraw
+            if ceiling is None or not ceiling.is_finite() or ceiling <= 0:
+                return RiskDecision(False, "buy_needs_limit")
             if self.risk.permanent_halt or self.risk.halted:
                 return RiskDecision(False, self.risk.halted or "permanent_halt")
             if self.account.position > 0:
                 return RiskDecision(False, "already_long")
-            if quantity * limit > self.account.cash:
+            if quantity * ceiling > self.account.cash:
                 return RiskDecision(False, "cash_limit")
             snapshot = self.account_snapshot
             free = min(
                 decimal(snapshot["cash"]),
                 decimal(snapshot.get("non_marginable_buying_power", snapshot["cash"])),
             )
-            if quantity * limit > free:
+            if quantity * ceiling > free:
                 return RiskDecision(False, "broker_cash_limit")
         intent = OrderIntent(
-            "hft-" + uuid4().hex, self.symbol, side, quantity, limit or price, now_ns
+            "hft-" + uuid4().hex, self.symbol, side, quantity, ceiling or price, now_ns
         )
         self.pending = BrokerOrder(intent)
         if side == "buy":
@@ -274,6 +282,8 @@ class OvernightRunner:
         for symbol in self.config.symbols:
             try:
                 fills = self.broker.book(symbol).poll()
+            except ValueError as error:  # the ledger refused a confirmed fill: stop for review
+                raise RuntimeError(f"{symbol} fill mismatch: {error}") from error
             except (RuntimeError, OSError) as error:
                 self._quality(f"poll: {error}", [symbol])
                 continue
@@ -293,14 +303,14 @@ class OvernightRunner:
             self.broker.reconcile()  # a second mismatch stops the run
         self.broker.save()
 
-    def _submit(self, symbol, side, quantity, tif, price, now, step, window, limit=None):
+    def _submit(self, symbol, side, quantity, tif, price, now, step, window, limit=None, cap=None):
         key = (symbol, window.session_id, step)
         if self.clock() < self.retry_after.get(key, 0):
             return None
         if self.clock() - self.broker.refreshed_ns > 4 * NS:
             self.broker.refresh()
         book = self.broker.book(symbol)
-        decision = book.submit_order(side, quantity, tif, price, self.clock(), limit=limit)
+        decision = book.submit_order(side, quantity, tif, price, self.clock(), limit=limit, cap=cap)
         sent = decision.allowed or (decision.reason or "").startswith("broker_rejected")
         if sent:
             self.attempted.add(key)
@@ -406,13 +416,13 @@ class OvernightRunner:
             if price is None:
                 continue
             cash = book.account.cash * CASH_USE
-            auction_limit = (price * AUCTION_LIMIT).quantize(Decimal("0.01"), ROUND_DOWN)
-            whole = (cash / auction_limit).to_integral_value(rounding=ROUND_DOWN)
+            auction_cap = price * AUCTION_CAP
+            whole = (cash / auction_cap).to_integral_value(rounding=ROUND_DOWN)
             use_auction = whole >= 1 and whole * price >= book.account.cash * WHOLE_SHARE_USE
             if auction:
                 if use_auction and (symbol, window.session_id, "entry") not in self.attempted:
                     self._submit(
-                        symbol, "buy", whole, "cls", price, now, "entry", window, auction_limit
+                        symbol, "buy", whole, "cls", price, now, "entry", window, cap=auction_cap
                     )
                 continue
             # Fractional stocks enter here; so does a whole-share stock whose on-close

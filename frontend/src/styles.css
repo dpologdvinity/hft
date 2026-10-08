@@ -791,6 +791,10 @@ tbody th {
 .paper-sessions-table {
   min-width: 610px;
 }
+.paper-sessions-table th.numeric + th:not(.numeric),
+.paper-sessions-table td.numeric + td:not(.numeric) {
+  padding-left: 24px; /* keep left-aligned text off the right-aligned figures */
+}
 .paper-mark {
   width: 48px;
   height: 48px;

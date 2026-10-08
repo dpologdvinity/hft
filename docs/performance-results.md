@@ -145,3 +145,26 @@ Single run on a shared machine (load average about 15 on 12 logical CPUs), both
 paths in the same process; outputs compared equal (4,680 bars). `Simulation` uses
 the C++ path automatically when `hftcore` is installed (`HFT_ENGINE=python` forces
 the reference).
+
+## Tick-to-decision latency and allocation-free deduplication (October 7, 2026)
+
+`cpp/bench/bench_engine.cpp` drives `hftcore::MarketEngine` (EMA-crossover) through
+a synthetic NVDA-like day: 6,337,500 quote and trade events and 4,619 decisions.
+"Decision" latency is the time of the event call that completed a bar and produced
+a decision (bar publication, history, 10 features, strategy).
+
+Profiling pointed at per-bar duplicate tracking: a node-based
+`unordered_set<std::string>` allocated a key per event and freed ~1,350 nodes at
+every bar boundary. It was replaced by a flat open-addressing set of 128-bit
+identity hashes cleared by a generation counter (no allocation, O(1) clear; a false
+duplicate would need a 128-bit collision). All parity suites still pass.
+
+| Same machine, load average ~11 | Before | After |
+| --- | ---: | ---: |
+| Event latency p50 / p99 | 155 ns / 1,467 ns | **71 ns / 354 ns** |
+| Decision latency p50 / p99 | 72.1 µs / 796.9 µs | **12.7 µs / 101.4 µs** |
+| Aggregator throughput (synthetic stream) | 1.40M events/s | **9.69M events/s** |
+| Real NVDA 2026-06-05 replay (Python 111.51 s) | 3.14 s (35.5x) | **1.29 s (86x)** |
+
+Single runs (replay: best of three) on a shared machine; tail percentiles include
+scheduler preemption from other workloads.

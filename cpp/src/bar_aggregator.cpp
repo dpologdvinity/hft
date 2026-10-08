@@ -11,19 +11,22 @@
 namespace hftcore {
 namespace {
 
-std::string numeric_key(char kind, std::int64_t stamp, std::initializer_list<double> values) {
-  std::string key(1, kind);
-  key.push_back('n');
-  key.append(reinterpret_cast<const char*>(&stamp), sizeof stamp);
-  for (double v : values) key.append(reinterpret_cast<const char*>(&v), sizeof v);
-  return key;
+// Identity keys hash the same values the Python reference compares: the id text,
+// or the event time and payload values. Kind and form are separate hash domains.
+Key128 numeric_key(char kind, std::int64_t stamp, std::initializer_list<double> values) {
+  char buffer[8 * 5];
+  std::size_t n = 0;
+  std::memcpy(buffer + n, &stamp, sizeof stamp);
+  n += sizeof stamp;
+  for (double v : values) {
+    std::memcpy(buffer + n, &v, sizeof v);
+    n += sizeof v;
+  }
+  return detail::hash_bytes({buffer, n}, static_cast<std::uint64_t>(kind) << 8 | 'n');
 }
 
-std::string text_key(char kind, std::string_view id) {
-  std::string key(1, kind);
-  key.push_back('s');
-  key.append(id);
-  return key;
+Key128 text_key(char kind, std::string_view id) {
+  return detail::hash_bytes(id, static_cast<std::uint64_t>(kind) << 8 | 's');
 }
 
 }  // namespace
@@ -50,7 +53,7 @@ void BarAggregator::init_start(std::int64_t event_ns) {
   }
 }
 
-bool BarAggregator::admit(std::int64_t stamp, std::int64_t arrival, std::string key) {
+bool BarAggregator::admit(std::int64_t stamp, std::int64_t arrival, const Key128& key) {
   if (session_ && !session_->contains(stamp)) {
     count("outside_session");
     return false;
@@ -75,7 +78,7 @@ bool BarAggregator::admit(std::int64_t stamp, std::int64_t arrival, std::string 
     count("buffer_overflow");
     throw std::invalid_argument("bounded event buffer exhausted");
   }
-  seen_.insert(std::move(key));
+  seen_.insert(key);
   max_event_ = std::max(max_event_, stamp);
   return true;
 }
@@ -84,9 +87,9 @@ std::vector<Bar> BarAggregator::add_quote(const Quote& q, std::optional<std::str
   if (q.arrival_ns < 0) throw std::invalid_argument("invalid arrival_ns");
   init_start(q.event_ns);
   std::vector<Bar> completed = advance_to(q.arrival_ns);
-  std::string key = id ? text_key('q', *id)
-                       : numeric_key('q', q.event_ns, {q.bid, q.ask, q.bid_size, q.ask_size});
-  if (!admit(q.event_ns, q.arrival_ns, std::move(key))) return completed;
+  const Key128 key = id ? text_key('q', *id)
+                        : numeric_key('q', q.event_ns, {q.bid, q.ask, q.bid_size, q.ask_size});
+  if (!admit(q.event_ns, q.arrival_ns, key)) return completed;
   quotes_.push_back(q);
   if (!last_quote_ || q.event_ns >= last_quote_->event_ns) last_quote_ = q;
   return completed;
@@ -101,8 +104,8 @@ std::vector<Bar> BarAggregator::add_trade(std::int64_t stamp, std::int64_t arriv
     throw std::invalid_argument("invalid trade");
   }
   std::vector<Bar> completed = advance_to(arrival);
-  std::string key = id ? text_key('t', *id) : numeric_key('t', stamp, {price, size});
-  if (!admit(stamp, arrival, std::move(key))) return completed;
+  const Key128 key = id ? text_key('t', *id) : numeric_key('t', stamp, {price, size});
+  if (!admit(stamp, arrival, key)) return completed;
   if (excluded) {
     count("filtered_trades");
   } else {

@@ -38,9 +38,10 @@ trade history, not strategy returns; the $500 allocation is simulated.
   history, feed-gap and warmup rules, the 10 market features and rule strategies.
   Parity tests require bit-identical output to the Python reference, down to CPython
   3.12's compensated float sum and no fused multiply-adds. Replaying a real 5.1M-quote
-  NVDA session takes **3.1 s instead of 111.5 s (35×)** with identical bars; the paper
-  bot and backtests use the C++ engine automatically. Next: native stream parsing
-  and a latency benchmark
+  NVDA session takes **1.3 s instead of 111.5 s (86×)** with identical bars; per-event
+  latency is **71 ns p50** and tick-to-decision **12.7 µs p50** after replacing a
+  string hash set with an allocation-free 128-bit identity set. The paper bot and
+  backtests use the C++ engine automatically. Next: native stream parsing
   ([design](docs/specs/2026-10-07-paper-trading-runner-design.md), [engine](cpp/README.md)).
 - **Measured performance work.** Profiling showed a memory-budget scan dominated
   session loading. Fixing it and loading an execution-only metadata view made a

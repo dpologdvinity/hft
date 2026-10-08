@@ -6,9 +6,9 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_set>
 #include <vector>
 
+#include "hftcore/id_set.hpp"
 #include "hftcore/types.hpp"
 
 namespace hftcore {
@@ -46,7 +46,7 @@ class BarAggregator {
   void count(const char* reason) { ++quality_[reason]; }
   void init_start(std::int64_t event_ns);
   // Shared admission checks; returns false when the event is discarded.
-  bool admit(std::int64_t event_ns, std::int64_t arrival_ns, std::string key);
+  bool admit(std::int64_t event_ns, std::int64_t arrival_ns, const Key128& key);
 
   std::string symbol_;
   std::int64_t width_;
@@ -58,7 +58,7 @@ class BarAggregator {
   std::map<std::string, std::int64_t> quality_;
   std::vector<Quote> quotes_;
   std::vector<TradeRecord> trades_;
-  std::unordered_set<std::string> seen_;
+  IdSet seen_;
   std::optional<double> last_price_;
   std::int64_t max_event_ = 0;
   std::int64_t clock_ = 0;

@@ -175,6 +175,42 @@ incomplete coverage, changed settings and a caller-supplied `passed` value canno
 satisfy the live constructor. Hash chains detect corruption, not a malicious
 owner rewriting the whole application or its local files.
 
+## Multi-stock paper runs (`hft trade`)
+
+`hft trade --paper` trades several stocks on one paper account, each with its own
+dollar budget, ledger and order book. Only one run can use a paper account at a
+time: every run takes the same account lock as `broker-paper`, and a new run needs
+a flat account with no open orders. A stopped run resumes from its saved state
+when restarted with the same name and settings; changed settings need a new name.
+
+```bash
+python -m hft trade --paper --symbols NVDA=100 AAPL=100 --strategy ema-crossover --name day
+python -m hft trade --paper --symbols KO=500 BAC=500 --strategy overnight-drift --name night
+python -m hft trade --status
+```
+
+Bar strategies decide on 5-second bars and are flat at every close. Stopping one
+(Ctrl-C or SIGTERM) cancels orders and sells holdings before exiting.
+
+`overnight-drift` acts on a clock instead, using the exchange calendar:
+
+| Time (ET) | Action |
+| --- | --- |
+| 09:00-09:27:30 | Sell held stock: `opg` market order for whole shares, day market order otherwise |
+| After 09:30 | Sell anything still held with a day market order, retried each minute |
+| 15:45-15:49:30 | Buy with a `cls` market order when whole shares use at least 90% of the stock's cash |
+| 15:57-15:59 | Buy the other stocks with fractional day market orders |
+
+The times move with early closes. Before each entry the account-wide guard marks
+holdings at the latest IEX trade: losing the daily limit since the previous entry
+skips that day's entries, and the drawdown limit stops entries for good. Exits are
+never blocked. Stopping the run cancels open orders but keeps positions, because the
+market is usually closed; restarting it sells them at the next open.
+
+Journals go to `logs/trade/<name>/<SYMBOL>-<start_ns>.jsonl` and state to
+`.state/trade/<name>/`. Rule-strategy runs are engineering evidence only and never
+count toward graduation.
+
 ## Live activation and operations
 
 The build and tests never submit live orders. The operator must separately

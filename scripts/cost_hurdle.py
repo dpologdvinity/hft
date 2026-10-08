@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT))
 
 from hft.account import Costs
 from hft.data import NS, atomic_json, load_session
+from hft.training import reserved_final_sessions
 
 HORIZONS_SECONDS = (5, 60, 300, 1800)
 GRID_SECONDS = 5
@@ -63,25 +64,32 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     costs = Costs()
+    entries = [
+        entry
+        for report in args.report
+        for entry in json.loads(report.read_text())["rows"]
+        if entry.get("date") is not None
+    ]
+    # Development sessions only: refuse reserved final-test sessions before loading any.
+    conflicts = {(e["symbol"], e["date"]) for e in entries} & reserved_final_sessions()
+    if conflicts:
+        raise SystemExit(f"refusing reserved final-test sessions: {sorted(conflicts)}")
     rows = []
-    for report in args.report:
-        for entry in json.loads(report.read_text())["rows"]:
-            if entry.get("date") is None:
-                continue
-            symbol, date = entry["symbol"], entry["date"]
-            manifest = args.cache / symbol.lower() / symbol / date / "manifest.json"
-            row = hurdle(load_session(manifest, metadata="execution"), costs)
-            row.update(symbol=symbol, date=date)
-            rows.append(row)
-            h = row["horizons"]
-            print(
-                f"{symbol:5} {date} cost {row['round_trip_cost_bps']:7.2f}bps  "
-                + "  ".join(
-                    f"{k}s sigma {v['sigma_bps']:6.1f} IC* {v['breakeven_ic']:.2f}"
-                    for k, v in h.items()
-                ),
-                flush=True,
-            )
+    for entry in entries:
+        symbol, date = entry["symbol"], entry["date"]
+        manifest = args.cache / symbol.lower() / symbol / date / "manifest.json"
+        row = hurdle(load_session(manifest, metadata="execution"), costs)
+        row.update(symbol=symbol, date=date)
+        rows.append(row)
+        h = row["horizons"]
+        print(
+            f"{symbol:5} {date} cost {row['round_trip_cost_bps']:7.2f}bps  "
+            + "  ".join(
+                f"{k}s sigma {v['sigma_bps']:6.1f} IC* {v['breakeven_ic']:.2f}"
+                for k, v in h.items()
+            ),
+            flush=True,
+        )
     atomic_json(args.output, {"horizons_seconds": HORIZONS_SECONDS, "rows": rows})
 
 

@@ -263,3 +263,20 @@ def test_loading_includes_existing_process_memory_before_allocating(tmp_path, mo
     )
     with pytest.raises(ValueError, match="working memory budget"):
         data.load_dataset(source)
+
+
+def test_reserved_final_sessions_cover_frozen_experiments_and_registry(tmp_path, monkeypatch):
+    artifacts = tmp_path / "artifacts" / "exp"
+    artifacts.mkdir(parents=True)
+    (artifacts / "experiment.json").write_text(
+        json.dumps({"symbol": "MCD", "final_test": ["2026-08-19", "2026-08-20"]})
+    )
+    registry = tmp_path / ".state" / "research-final-tests.json"
+    registry.parent.mkdir()
+    registry.write_text(json.dumps({"k": {"symbol": "NVDA", "session_id": "2026-09-01"}}))
+    monkeypatch.setattr(training, "TEST_REGISTRY", registry)
+    assert training.reserved_final_sessions(tmp_path / "artifacts") == {
+        ("MCD", "2026-08-19"),
+        ("MCD", "2026-08-20"),
+        ("NVDA", "2026-09-01"),
+    }

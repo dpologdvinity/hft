@@ -29,20 +29,9 @@ from hft.data import NS, atomic_json, load_session
 from hft.execution import Simulation
 from hft.history import download_sessions
 from hft.research import is_real_executable
-from hft.training import TEST_REGISTRY
+from hft.training import reserved_final_sessions
 
 GAP_THRESHOLDS_SECONDS = (5, 15, 60)
-
-
-def reserved_pairs():
-    pairs = set()
-    for path in (ROOT / "artifacts").rglob("experiment.json"):
-        frozen = json.loads(path.read_text())
-        pairs |= {(frozen.get("symbol"), day) for day in frozen.get("final_test", [])}
-    if TEST_REGISTRY.exists():
-        for row in json.loads(TEST_REGISTRY.read_text()).values():
-            pairs.add((row["symbol"], row["session_id"]))
-    return pairs
 
 
 def measure(manifest_path):
@@ -93,7 +82,7 @@ def main():
     args = parser.parse_args()
     symbols = [s.upper() for s in args.symbols]
     dates = sorted(args.dates)
-    conflicts = {(s, d) for s in symbols for d in dates} & reserved_pairs()
+    conflicts = {(s, d) for s in symbols for d in dates} & reserved_final_sessions()
     if conflicts:
         raise SystemExit(f"refusing reserved final-test sessions: {sorted(conflicts)}")
     report = json.loads(args.report.read_text()) if args.report.exists() else {"rows": []}

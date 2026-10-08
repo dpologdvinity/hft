@@ -31,6 +31,23 @@ DEFAULTS = {
 }
 
 
+def reserved_final_sessions(artifacts=None):
+    """(symbol, session_id) pairs held out by any frozen experiment or already consumed.
+
+    Tools that read market data outside an experiment (sweeps, diagnostics) must
+    refuse these before opening any partition.
+    """
+    artifacts = Path(artifacts) if artifacts else TEST_REGISTRY.parents[1] / "artifacts"
+    pairs = set()
+    for path in artifacts.rglob("experiment.json"):
+        frozen = json.loads(path.read_text())
+        pairs |= {(frozen.get("symbol"), day) for day in frozen.get("final_test", [])}
+    if TEST_REGISTRY.exists():
+        for row in json.loads(TEST_REGISTRY.read_text()).values():
+            pairs.add((row["symbol"], row["session_id"]))
+    return pairs
+
+
 def reserve_final_test(experiment):
     """Consume real test identities under one project-wide serialized registry."""
     if experiment.get("synthetic"):

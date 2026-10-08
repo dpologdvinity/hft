@@ -1,14 +1,14 @@
 """One causal streaming engine for replay, dry runs and broker decisions."""
 
 import time
-from collections import deque
 from dataclasses import asdict
 
 from .account import Account, Costs
 from .execution import LocalExecution
-from .features import LOOKBACK, observation
-from .feed import BarAggregator, historical_timeline, quote_from_event
+from .features import assemble, state_features
+from .feed import historical_timeline, quote_from_event
 from .logs import EventLog
+from .market_engine import GapEvent, make_market_engine
 from .risk import RiskGateway, Snapshot
 from .sizing import SizingConfig, make_intent
 
@@ -36,6 +36,7 @@ class PaperEngine:
         submit_callback=None,
         outstanding=None,
         clock=time.time_ns,
+        market_engine=None,
     ):
         self.policy, self.symbol = policy, symbol
         self.account = account or Account(initial_cash, costs or Costs())
@@ -47,17 +48,16 @@ class PaperEngine:
         self.execution = LocalExecution(self.account, self.risk, latency_ms)
         self.submit_callback = submit_callback
         self.outstanding = outstanding or (lambda: self.execution.pending is not None)
-        self.history = deque(maxlen=LOOKBACK + 1)
+        self.market = market_engine or make_market_engine(symbol, bar_seconds=bar_seconds)
+        self.last_update = None
         self.log = EventLog(log_path, clock=clock)
         self.source, self.synthetic = source, synthetic
-        self.session = self.aggregator = self.quote = None
+        self.session = self.quote = None
         self.bar_seconds = bar_seconds
         self.closed = False
         self.session_complete = False
         self.completed_sessions = 0
-        self.first_event_ns = self.last_event_ns = None
-        self._warmup_after_ns = 0
-        self.last_tick_ns = None
+        self.first_event_ns = None
         self._trade_count = len(self.account.trades)
         self.log.write(
             "start",
@@ -78,16 +78,9 @@ class PaperEngine:
         if self.session is not None:
             self.end_session(complete=False)
         self.session = session
-        self.aggregator = BarAggregator(self.symbol, self.bar_seconds, session)
-        if now_ns is not None and now_ns > session.open_ns:
-            self.aggregator.start = max(
-                session.open_ns, now_ns // (self.bar_seconds * NS) * (self.bar_seconds * NS)
-            )
-        self.history.clear()
+        self.market.start_session(session, now_ns)
         self.quote = None
-        self.first_event_ns = self.last_event_ns = None
-        self._warmup_after_ns = session.open_ns
-        self.last_tick_ns = None
+        self.first_event_ns = None
         self.session_complete = now_ns is None or now_ns <= session.open_ns + NS
         self.account.session_start_equity = self.account.cash
         self.log.write(
@@ -185,29 +178,47 @@ class PaperEngine:
             position=self.account.position,
         )
 
-    def on_bar(self, bar, now_ns):
-        # Carried bars published when an outage ends are retained by the
-        # aggregator, but cannot rebuild the policy's fresh decision warmup.
-        if bar.start_ns < self._warmup_after_ns:
+    # Market state lives in the market engine; these views keep existing callers working.
+    @property
+    def history(self):
+        return self.market.history
+
+    @property
+    def aggregator(self):
+        return self.market.aggregator
+
+    @property
+    def last_event_ns(self):
+        return self.market.last_event_ns
+
+    @property
+    def last_tick_ns(self):
+        return self.market.last_tick_ns
+
+    def on_bar(self, update):
+        if not update.accepted:
             return
-        if self.history and bar.end_ns - self.history[-1].end_ns != self.bar_seconds * NS:
-            self.history.clear()
+        bar, now_ns = update.bar, update.now_ns
+        if update.reset:
             self.session_complete = False
-            self.log.write("gap", event_ns=now_ns, reason="bar_gap")
-        self.history.append(bar)
+            self.log.write("gap", event_ns=now_ns, reason=update.reset)
         decision = self.risk.observe(self.snapshot(), now_ns)
         if decision.requires_flatten:
             self._submit(0, now_ns, emergency=True)
-        if len(self.history) >= LOOKBACK + 1:
+        if update.ready:
+            self.last_update = update
             start = time.perf_counter_ns()
             action = self.policy(
-                observation(
-                    tuple(self.history),
-                    self.account,
-                    self.risk,
-                    self.session,
-                    now_ns=now_ns,
-                    quote=self.quote,
+                assemble(
+                    update.market,
+                    state_features(
+                        tuple(self.history),
+                        self.account,
+                        self.risk,
+                        self.session,
+                        now_ns=now_ns,
+                        quote=self.quote,
+                    ),
                 )
             )
             if isinstance(action, bool) or action not in (0, 1):
@@ -237,17 +248,16 @@ class PaperEngine:
         if self.session is None:
             raise ValueError("start a session before market events")
         self.log.write("market", event_ns=arrival_ns, payload={**event, "arrival_ns": arrival_ns})
-        if self.last_event_ns is not None and arrival_ns - self.last_event_ns > 5 * NS:
-            self.history.clear()
-            self._warmup_after_ns = arrival_ns
-            self.session_complete = False
-            self.log.write("gap", event_ns=arrival_ns, reason="feed_gap")
-            if not self.submit_callback:
-                self.execution.cancel()
+        updates = self.market.on_event(event, arrival_ns)
         self.first_event_ns = self.first_event_ns or arrival_ns
-        self.last_event_ns = arrival_ns
-        for bar in self.aggregator.add(event, arrival_ns):
-            self.on_bar(bar, arrival_ns)
+        for update in updates:
+            if isinstance(update, GapEvent):
+                self.session_complete = False
+                self.log.write("gap", event_ns=arrival_ns, reason=update.reason)
+                if not self.submit_callback:
+                    self.execution.cancel()
+            else:
+                self.on_bar(update)
         if event.get("T") == "q":
             quote = quote_from_event(event, arrival_ns)
             if self.session.contains(quote.event_ns) and quote.event_ns <= arrival_ns + 250_000_000:
@@ -256,22 +266,21 @@ class PaperEngine:
     def tick(self, now_ns):
         if self.session is None:
             return
-        if self.last_tick_ns is not None and now_ns - self.last_tick_ns > 5 * NS:
-            self.history.clear()
-            self._warmup_after_ns = now_ns
-            self.session_complete = False
-            self.log.write("gap", event_ns=now_ns, reason="runtime_sleep")
-            self.risk.halted = "runtime_gap"
-            if not self.submit_callback:
-                self.execution.cancel()
-        self.last_tick_ns = now_ns
-        completed = self.aggregator.advance_to(now_ns)
+        updates = self.market.advance_to(now_ns)
+        completed = [u for u in updates if not isinstance(u, GapEvent)]
+        for gap in updates:
+            if isinstance(gap, GapEvent):
+                self.session_complete = False
+                self.log.write("gap", event_ns=now_ns, reason=gap.reason)
+                self.risk.halted = "runtime_gap"
+                if not self.submit_callback:
+                    self.execution.cancel()
         if completed or now_ns >= self.session.close_ns - int(
             self.risk.config.pre_close_seconds * NS
         ):
             self.log.write("timer", event_ns=now_ns)
-        for bar in completed:
-            self.on_bar(bar, now_ns)
+        for update in completed:
+            self.on_bar(update)
         if self.quote:
             decision = self.risk.observe(self.snapshot(), now_ns)
             if decision.requires_flatten:
@@ -318,8 +327,8 @@ class PaperEngine:
             first_event_ns=self.first_event_ns,
             last_event_ns=self.last_event_ns,
         )
-        self.session = self.aggregator = None
-        self.history.clear()
+        self.session = None
+        self.market.end_session()
 
     def finish(self, *, complete=False, reconciled=True):
         if self.closed:

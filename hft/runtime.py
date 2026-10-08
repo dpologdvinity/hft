@@ -199,7 +199,7 @@ async def run_stream(
             if event and engine.session:
                 arrival = event.get("arrival_ns") or now
                 if now - arrival > NS:
-                    engine.history.clear()
+                    engine.market.reset_history()
                     engine.session_complete = False
                     queued.clear()
                     engine.risk.halted = "runtime_gap"

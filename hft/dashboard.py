@@ -45,6 +45,17 @@ class Dashboard:
         self._market = []
         self._paper_cache = {}
 
+    def trading(self):
+        """Paper trading runs per stock, from saved state and journal tails only."""
+        from .trading.status import stock_rows
+
+        base = self.root / ".state" / "trade"
+        runs = sorted(p.name for p in base.glob("*") if p.is_dir()) if base.is_dir() else []
+        return {
+            "read_only": True,
+            "runs": [{"name": name, "stocks": stock_rows(self.root, name)} for name in runs],
+        }
+
     def _read(self, path):
         return _json(_contained(self.root, path))
 
@@ -484,6 +495,16 @@ def create_server(root, port=8765):
             if not self._local():
                 return self._reply(403, b"Local requests only")
             route = unquote(urlsplit(self.path).path)
+            if route == "/api/trading":
+                try:
+                    body = json.dumps(dashboard.trading(), allow_nan=False).encode()
+                    return self._reply(200, body, "application/json")
+                except (OSError, ValueError, TypeError, KeyError):
+                    return self._reply(
+                        503,
+                        b'{"error":"Paper trading state is temporarily unavailable."}',
+                        "application/json",
+                    )
             if route == "/api/dashboard":
                 try:
                     body = json.dumps(dashboard.snapshot(), allow_nan=False).encode()

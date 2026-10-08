@@ -6,6 +6,7 @@ import TrainingRun from './TrainingRun';
 import { currency, number, percent, sessionDate, sourceLabel, timestamp } from './format';
 import { EmptyState, Panel, Status } from './primitives';
 import { useDashboard } from './useDashboard';
+import { TradingBots } from './TradingBots';
 
 const views = {
   overview: {
@@ -135,6 +136,7 @@ function PaperView({ paper, training }) {
   }
   return (
     <div className="paper-layout">
+      <TradingBots />
       <Panel
         title="Paper-trading eligibility"
         actions={<Status value={value.status} />}

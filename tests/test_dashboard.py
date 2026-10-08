@@ -242,3 +242,40 @@ def test_http_serves_only_built_assets_and_read_only_api(tmp_path):
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_trading_endpoint_reports_runs_read_only(tmp_path):
+    workspace(tmp_path)
+    built = tmp_path / "frontend/dist"
+    built.mkdir(parents=True)
+    (built / "index.html").write_text("<html></html>")
+    state_dir = tmp_path / ".state" / "trade" / "demo"
+    state_dir.mkdir(parents=True)
+    book = {
+        "account": {"position": "0", "cash": "200", "initial_cash": "200"},
+        "risk": {"halted": "daily_loss"},
+        "pending": None,
+    }
+    (state_dir / "x.json").write_text(json.dumps({"state": {"books": {"NVDA": book}}}))
+    server = create_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urlopen(base + "/api/trading") as response:
+            body = json.load(response)
+        assert body["read_only"] is True
+        (run,) = body["runs"]
+        assert run["name"] == "demo"
+        assert run["stocks"][0]["symbol"] == "NVDA"
+        assert run["stocks"][0]["status"] == "halted (daily_loss)"
+        with pytest.raises(HTTPError) as error:
+            urlopen(Request(base + "/api/trading", headers={"Host": "attacker.invalid"}))
+        assert error.value.code == 403
+        with pytest.raises(HTTPError) as error:
+            urlopen(Request(base + "/api/trading", data=b"{}", method="POST"))
+        assert error.value.code == 405
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

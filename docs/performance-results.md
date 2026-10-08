@@ -106,3 +106,23 @@ Profiling the execution view on NVDA shows the remaining time is in per-event wo
 
 Both are on the causal execution and accounting path, so any change needs the same
 fingerprint and rollout equivalence proof before adoption.
+
+## C++ bar aggregator (preliminary, October 7, 2026)
+
+`hftcore` (C++20, pybind11) ports `hft.feed.BarAggregator` line for line. Parity
+tests (`tests/test_engine_parity.py`) require every bar field and quality counter
+to equal the Python reference on shared edge-case vectors and full synthetic
+sessions; matching CPython 3.12's compensated float `sum()` was needed for
+bit-identical VWAPs.
+
+| Implementation | Events/s | ns per event |
+| --- | ---: | ---: |
+| Python reference (`hft.feed.BarAggregator.add`, 299,000 events) | 35,611 | 28,081 |
+| C++ (`cpp/bench/bench_aggregator.cpp`, 6,337,500 events) | 1,404,946 | 712 |
+
+Synthetic NVDA-like stream: one quote every 4 ms with provider ids and a trade every
+48 ms over a 6.5-hour session. Single runs on the same machine while an unrelated
+CPU-heavy job was running (load average about 16-22 on 12 logical CPUs), so both
+figures are conservative; the ratio (about 39x) is the comparable quantity. This
+measures the aggregator alone, not a full simulation; the first C++ version still
+builds a string identity key per event, which the planned hashed-key change removes.

@@ -17,4 +17,5 @@ wheel.license-files = []
 
 [tool.scikit-build.cmake.define]
 HFTCORE_BUILD_TESTS = "OFF"
+HFTCORE_BUILD_BENCH = "OFF"
 HFTCORE_BUILD_PYTHON = "ON"

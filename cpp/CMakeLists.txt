@@ -32,6 +32,13 @@ if(HFTCORE_BUILD_PYTHON)
   install(TARGETS hftcore LIBRARY DESTINATION .)
 endif()
 
+option(HFTCORE_BUILD_BENCH "Build benchmarks" ON)
+if(HFTCORE_BUILD_BENCH)
+  add_executable(hftcore_bench_aggregator bench/bench_aggregator.cpp)
+  target_link_libraries(hftcore_bench_aggregator PRIVATE hftcore_core)
+  target_compile_options(hftcore_bench_aggregator PRIVATE ${HFTCORE_WARNINGS})
+endif()
+
 if(HFTCORE_BUILD_TESTS)
   include(FetchContent)
   FetchContent_Declare(

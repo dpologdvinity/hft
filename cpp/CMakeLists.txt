@@ -18,9 +18,11 @@ if(HFTCORE_SANITIZE)
   add_link_options(-fsanitize=address,undefined)
 endif()
 
-add_library(hftcore_core STATIC src/version.cpp src/decimal.cpp src/timestamp.cpp src/bar_aggregator.cpp)
+add_library(hftcore_core STATIC src/version.cpp src/decimal.cpp src/timestamp.cpp src/bar_aggregator.cpp src/features.cpp src/market_engine.cpp)
 target_include_directories(hftcore_core PUBLIC include)
 target_compile_options(hftcore_core PRIVATE ${HFTCORE_WARNINGS})
+# Bit-identical results with the Python reference: no fused multiply-add.
+target_compile_options(hftcore_core PUBLIC -ffp-contract=off)
 set_target_properties(hftcore_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if(HFTCORE_BUILD_PYTHON)
@@ -47,7 +49,7 @@ if(HFTCORE_BUILD_TESTS)
     URL_HASH SHA256=c991b247a1a0d7bb9c39aa35faf0fe9e19764213f28ffba3109388e62ee0269c
   )
   FetchContent_MakeAvailable(Catch2)
-  add_executable(hftcore_tests tests/test_version.cpp tests/test_decimal.cpp tests/test_timestamp.cpp tests/test_bar_aggregator.cpp)
+  add_executable(hftcore_tests tests/test_version.cpp tests/test_decimal.cpp tests/test_timestamp.cpp tests/test_bar_aggregator.cpp tests/test_market_engine.cpp)
   target_link_libraries(hftcore_tests PRIVATE hftcore_core Catch2::Catch2WithMain)
   target_compile_options(hftcore_tests PRIVATE ${HFTCORE_WARNINGS})
   include(CTest)

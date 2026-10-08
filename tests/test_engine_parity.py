@@ -3,6 +3,7 @@
 import importlib
 import os
 
+import numpy as np
 import pytest
 from engine_vectors import OPEN, SESSION, engine_vectors, quote, trade
 
@@ -94,3 +95,50 @@ def test_negative_arrival_and_float_clock_raise(hftcore):
     with pytest.raises(ValueError, match="integer"):
         native.advance_to(1.5)
     assert native.add(trade(OPEN)[0], OPEN) == []
+
+
+def _engine_run(engine, session, timeline, now_ns=None):
+    engine.start_session(session, now_ns)
+    out = []
+    for event, now in timeline:
+        updates = engine.advance_to(now) if event is None else engine.on_event(event, now)
+        for u in updates:
+            if hasattr(u, "market"):
+                market = None if u.market is None else u.market.view(np.uint32).tolist()
+                out.append((u.bar, u.now_ns, u.accepted, u.reset, u.ready, market, u.action))
+            else:
+                out.append(u)
+        out.append(("history", tuple(engine.history)))
+    return out, dict(engine.quality), engine.warmup_after_ns
+
+
+def _engines(hftcore, symbol, strategy):
+    from hft.market_engine import PyMarketEngine
+    from hft.market_engine_cpp import CppMarketEngine
+
+    return PyMarketEngine(symbol, strategy), CppMarketEngine(symbol, strategy)
+
+
+@pytest.mark.parametrize("strategy", ["model", "ema-crossover", "hold-day"])
+@pytest.mark.parametrize("vector", engine_vectors(), ids=lambda v: v[0])
+def test_market_engine_matches_reference_on_vectors(hftcore, vector, strategy):
+    _, session, symbol, timeline = vector
+    python, native = _engines(hftcore, symbol, strategy)
+    assert _engine_run(native, session, timeline) == _engine_run(python, session, timeline)
+
+
+@pytest.mark.parametrize("strategy", ["model", "ema-crossover", "hold-day"])
+def test_market_engine_matches_reference_on_sessions(hftcore, strategy):
+    from hft.calendar import SessionWindow
+
+    data = synthetic_sessions(1, 200, seed=4)[0]
+    window = SessionWindow(data.session_id, data.open_ns, data.close_ns)
+    timeline = list(historical_timeline(data))
+    python, native = _engines(hftcore, data.symbol, strategy)
+    expected = _engine_run(python, window, timeline)
+    assert sum(1 for row in expected[0] if len(row) == 7 and row[4]) > 50  # many decisions
+    assert _engine_run(native, window, timeline) == expected
+    late = data.open_ns + 300 * 1_000_000_000 + 7
+    assert _engine_run(native, window, timeline, late) == _engine_run(
+        python, window, timeline, late
+    )

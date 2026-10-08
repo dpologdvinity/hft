@@ -33,12 +33,13 @@ trade history, not strategy returns; the $500 allocation is simulated.
   paired block bootstrap). Final-test dates are durably reserved before their prices
   can be opened, and regression tests fail if the loader's preflight or read stages touch a
   reserved partition.
-- **C++ market-data engine (in progress).** `hftcore` ports the causal 5-second bar
-  aggregator to C++20 behind pybind11, with CMake, Catch2 and a CI job. Parity tests
-  require bit-identical output to the Python reference (down to CPython 3.12's
-  compensated float sum); the first version is about **39× faster** on a synthetic
-  NVDA-like stream. Next: features, rule strategies, native replay and stream parsing,
-  powering both backtests and a multi-stock paper-trading runner
+- **C++ market-data engine (in progress).** `hftcore` (C++20, pybind11, CMake,
+  Catch2, CI) ports the causal 5-second bar aggregator and the market engine: decision
+  history, feed-gap and warmup rules, the 10 market features and rule strategies.
+  Parity tests require bit-identical output to the Python reference, down to CPython
+  3.12's compensated float sum and no fused multiply-adds; the aggregator is about
+  **39× faster** on a synthetic NVDA-like stream. Next: native replay for backtests,
+  stream parsing and a multi-stock paper-trading runner
   ([design](docs/specs/2026-10-07-paper-trading-runner-design.md), [engine](cpp/README.md)).
 - **Measured performance work.** Profiling showed a memory-budget scan dominated
   session loading. Fixing it and loading an execution-only metadata view made a

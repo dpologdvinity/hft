@@ -112,6 +112,26 @@ Open <http://127.0.0.1:8765>. The dashboard binds to loopback, is read-only, nev
 reads reserved final-test prices and has no order or activation controls. A fresh
 clone shows empty states until local data and experiments exist.
 
+## Paper trading on your chosen stocks
+
+Trade any 1-30 stocks on your Alpaca **paper** account (simulated money), each with
+its own dollar budget, every trading day until you stop it:
+
+```bash
+export ALPACA_API_KEY=... ALPACA_SECRET_KEY=...              # free market data
+export ALPACA_PAPER_API_KEY=... ALPACA_PAPER_SECRET_KEY=...  # paper account
+python -m hft trade --paper --symbols NVDA=200 AAPL=100 MSFT=100 --strategy ema-crossover
+python -m hft trade --status                                  # per-stock position and profit
+```
+
+Strategies: `ema-crossover`, `hold-day`, or `model:<bundle>` (a trained model, for
+the stock it was trained on). The run waits for the open, trades, goes flat before
+the close and repeats daily; Ctrl-C cancels orders, sells holdings and reconciles.
+Each stock has its own ledger and order book on one dedicated paper account; feed
+silence or a disconnect blocks new entries instead of stopping the run, and daily
+loss (2%) and drawdown (5%) limits apply per stock and across the account. Real
+money is refused until a strategy passes research and 30 paper sessions.
+
 ## Research workflow
 
 ```bash

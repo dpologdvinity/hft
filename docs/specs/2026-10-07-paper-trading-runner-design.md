@@ -126,7 +126,8 @@ fraction-based `RiskConfig` / `SizingConfig` defaults and validation (10% entry,
 - Account: total invested never exceeds the sum of budgets, and the sum of budgets
   must not exceed the paper account's non-borrowed cash at start.
 - Daily loss (default 2%) per stock (of its budget) and for the account (of the total
-  budget): new entries stop for that stock / all stocks until the next session.
+  budget): entries stop for that stock / all stocks until the next session, and the
+  existing risk gateway also sells current holdings (its unchanged, stricter behavior).
 - Drawdown (default 5%) per stock and account latches entries for the rest of the
   run. No bypass flag; trading again needs a new run name, which requires a flat
   account.
@@ -176,8 +177,11 @@ fraction-based `RiskConfig` / `SizingConfig` defaults and validation (10% entry,
 
 ### Journals, status and dashboard
 
-- Journals: `logs/trade/<run>/session-<date>.jsonl` in the existing hash-chained
-  format, `source: "trade-paper"`, strategy and engine identity, per-row symbol.
+- Journals: `logs/trade/<run>/<SYMBOL>-<run start ns>.jsonl` (one hash-chained file
+  per stock and process start, so a resumed run never overwrites an old journal),
+  `source: "trade-paper"`, strategy and engine identity. Trade runs journal bars,
+  decisions, orders, fills and per-bar equity but not raw market rows, which would
+  reach millions of rows per liquid stock per day.
   `evidence.graduate` only accepts `broker-paper`, so these never count as evidence.
 - `hft trade --status` reads state and journals only (no network).
 - Dashboard: read-only `/api/trading` endpoint and a Paper trading panel per run and

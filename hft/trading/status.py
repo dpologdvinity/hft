@@ -5,9 +5,19 @@ from decimal import Decimal
 from pathlib import Path
 
 
-def _latest_journal(log_dir: Path, symbol: str):
-    files = sorted(log_dir.glob(f"{symbol}-*.jsonl"), key=lambda p: p.stat().st_mtime)
-    return files[-1] if files else None
+def _journals(log_dir: Path, symbol: str):
+    """The stock's journals, newest first (each restart of a run starts a new one)."""
+    return sorted(log_dir.glob(f"{symbol}-*.jsonl"), key=lambda p: p.stat().st_mtime)[::-1]
+
+
+def _last_equity(journals, tail):
+    from .command import tail_rows
+
+    for rows in [tail] + [tail_rows(p) for p in journals[1:]]:
+        for row in reversed(rows):
+            if row.get("event") == "equity":
+                return Decimal(str(row["equity"]))
+    return None
 
 
 def stock_rows(root: Path, name: str):
@@ -24,11 +34,11 @@ def stock_rows(root: Path, name: str):
         account, risk = book["account"], book["risk"]
         position, cash = Decimal(account["position"]), Decimal(account["cash"])
         budget = Decimal(account["initial_cash"])
-        journal = _latest_journal(log_dir, symbol)
-        tail = tail_rows(journal) if journal else []
-        equity = next(
-            (Decimal(str(r["equity"])) for r in reversed(tail) if r.get("event") == "equity"), cash
-        )
+        journals = _journals(log_dir, symbol)
+        tail = tail_rows(journals[0]) if journals else []
+        equity = _last_equity(journals, tail)
+        if equity is None:
+            equity = cash if position == 0 else None  # a holding is never shown at zero
         status = "trading"
         if risk.get("halted"):
             status = f"halted ({risk['halted']})"
@@ -43,8 +53,10 @@ def stock_rows(root: Path, name: str):
                 "budget": str(budget),
                 "position": str(position.normalize()),
                 "cash": str(cash.quantize(Decimal("0.01"))),
-                "equity": str(equity.quantize(Decimal("0.01"))),
-                "profit": str((equity - budget).quantize(Decimal("0.01"))),
+                "equity": None if equity is None else str(equity.quantize(Decimal("0.01"))),
+                "profit": None
+                if equity is None
+                else str((equity - budget).quantize(Decimal("0.01"))),
                 "pending": book["pending"] is not None,
                 "updated_ns": tail[-1].get("wall_ns") if tail else None,
             }
@@ -67,6 +79,7 @@ def format_status(root: Path, name=None):
         for r in rows:
             lines.append(
                 f"  {r['symbol']:<7} {r['status']:<16} {r['budget']:>8} {r['position']:>11} "
-                f"{r['equity']:>11} {r['profit']:>10}  {'open' if r['pending'] else '-'}"
+                f"{r['equity'] or 'n/a':>11} {r['profit'] or 'n/a':>10}  "
+                f"{'open' if r['pending'] else '-'}"
             )
     return "\n".join(lines)

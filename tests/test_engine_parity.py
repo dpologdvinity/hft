@@ -175,3 +175,135 @@ def test_mark_gap_matches_reference(hftcore, strategy):
 
     python, native = _engines(hftcore, data.symbol, strategy)
     assert run(native) == run(python)
+
+
+def _frames():
+    """Alpaca-format frames: quotes in lots, int trade ids, conditions, noise."""
+    from datetime import UTC, datetime
+
+    def stamp(ns, offset=False):
+        text = datetime.fromtimestamp(ns // 10**9, UTC).strftime("%Y-%m-%dT%H:%M:%S")
+        text += f".{ns % 10**9:09d}"
+        if offset:
+            hours = datetime.fromtimestamp(ns // 10**9 - 5 * 3600, UTC)
+            return hours.strftime("%Y-%m-%dT%H:%M:%S") + f".{ns % 10**9:09d}-05:00"
+        return text + "Z"
+
+    # (frame, arrival_ns): arrivals trail event times by 50 us.
+    frames = [
+        ([{"T": "success", "msg": "authenticated"}], OPEN - 10**9),
+        ([{"T": "subscription", "quotes": []}], OPEN - 10**9),
+    ]
+    for k in range(2000):
+        t = OPEN + k * 400_000_000
+        price = round(100 + 0.003 * (k % 211) - 0.002 * (k % 37), 2)
+        frame = [
+            {
+                "T": "q",
+                "S": "AAA",
+                "bp": price - 0.01,
+                "ap": price + 0.01,
+                "bs": [3, 0.07, 1.5][k % 3],
+                "as": 2,
+                "t": stamp(t, k % 5 == 0),
+                "z": "C",
+            },
+            {"T": "q", "S": "ZZZ", "bp": 1, "ap": 2, "bs": 1, "as": 1, "t": stamp(t)},
+        ]
+        if k % 4 == 0:
+            frame.append(
+                {
+                    "T": "t",
+                    "S": "AAA",
+                    "i": k,
+                    "p": price,
+                    "s": 10 + k % 7,
+                    "t": stamp(t + 1),
+                    "c": ["@", "W"][: 1 + (k % 9 == 0)],
+                    "z": "C",
+                }
+            )
+        if k % 50 == 25:
+            frame.append({"T": "c", "S": "AAA", "t": stamp(t + 2)})
+        if k % 97 == 0:
+            frame.append(7)  # malformed entry
+        frames.append((frame, t + 50_000))
+    frames.insert(10, ("not a list", OPEN + 3 * 400_000_000))
+    return frames
+
+
+def test_frame_router_matches_the_python_stream_path(hftcore):
+    import json
+
+    from hft.calendar import SessionWindow
+    from hft.market_engine_cpp import CppMarketEngine
+
+    window = SessionWindow("2025-01-06", OPEN, OPEN + 3600 * 10**9)
+    python, native = _engines(hftcore, "AAA", "ema-crossover")
+    python.start_session(window)
+    native.start_session(window)
+    router = hftcore.FrameRouter()
+    router.add(native._native)
+    assert isinstance(native, CppMarketEngine)
+    expected, actual, malformed = [], [], 0
+    for frame, arrival in _frames():
+        raw = json.dumps(frame).encode()
+        try:
+            messages = json.loads(raw)
+            assert isinstance(messages, list)
+        except AssertionError:
+            malformed += 1
+            messages = []
+        for message in messages:
+            if not isinstance(message, dict):
+                malformed += 1
+                continue
+            if message.get("T") in ("q", "t", "c", "x") and message.get("S") == "AAA":
+                for u in python.on_event({**message, "arrival_ns": arrival}, arrival):
+                    expected.append(_comparable(u))
+        updates, quotes, bad = router.on_frame(raw, arrival)
+        malformed -= bad
+        for symbol, row in updates:
+            assert symbol == "AAA"
+            actual += [_comparable(u) for u in native._convert([row])]
+        for _, event_ns, bid, ask, bid_size, ask_size in quotes:
+            from hft.feed import parse_timestamp, quote_from_event
+
+            source = next(
+                m
+                for m in messages
+                if isinstance(m, dict) and m.get("T") == "q" and m.get("S") == "AAA"
+            )
+            reference = quote_from_event(source, arrival)
+            assert event_ns == parse_timestamp(source["t"])
+            assert (bid, ask, bid_size, ask_size) == (
+                float(reference.bid),
+                float(reference.ask),
+                float(reference.bid_size),
+                float(reference.ask_size),
+            )
+    assert malformed == 0
+    assert actual == expected
+    assert sum(1 for row in expected if row[0] == "bar" and row[5]) > 50  # decisions
+
+
+def _comparable(update):
+    if hasattr(update, "bar"):
+        market = None if update.market is None else update.market.view(np.uint32).tolist()
+        return (
+            "bar",
+            update.bar,
+            update.now_ns,
+            update.accepted,
+            update.reset,
+            update.ready,
+            market,
+            update.action,
+        )
+    return ("gap", update.now_ns, update.reason)
+
+
+def test_frame_router_raises_stream_errors(hftcore):
+    router = hftcore.FrameRouter()
+    with pytest.raises(RuntimeError, match="stream error: 406"):
+        router.on_frame(b'[{"T":"error","code":406,"msg":"connection limit"}]', OPEN)

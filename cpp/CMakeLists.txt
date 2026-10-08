@@ -18,8 +18,21 @@ if(HFTCORE_SANITIZE)
   add_link_options(-fsanitize=address,undefined)
 endif()
 
-add_library(hftcore_core STATIC src/version.cpp src/decimal.cpp src/timestamp.cpp src/bar_aggregator.cpp src/features.cpp src/market_engine.cpp src/replay.cpp)
+include(FetchContent)
+FetchContent_Declare(
+  simdjson
+  URL https://github.com/simdjson/simdjson/archive/refs/tags/v3.10.1.tar.gz
+  URL_HASH SHA256=1e8f881cb2c0f626c56cd3665832f1e97b9d4ffc648ad9e1067c134862bba060
+)
+set(SIMDJSON_DEVELOPER_MODE OFF CACHE INTERNAL "")
+set(SIMDJSON_BUILD_STATIC_LIB ON CACHE INTERNAL "")
+set(BUILD_SHARED_LIBS OFF CACHE INTERNAL "")
+FetchContent_MakeAvailable(simdjson)
+set_target_properties(simdjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+add_library(hftcore_core STATIC src/version.cpp src/decimal.cpp src/timestamp.cpp src/bar_aggregator.cpp src/features.cpp src/market_engine.cpp src/replay.cpp src/frame_router.cpp)
 target_include_directories(hftcore_core PUBLIC include)
+target_link_libraries(hftcore_core PRIVATE simdjson)
 target_compile_options(hftcore_core PRIVATE ${HFTCORE_WARNINGS})
 # Bit-identical results with the Python reference: no fused multiply-add.
 target_compile_options(hftcore_core PUBLIC -ffp-contract=off)
@@ -40,6 +53,8 @@ if(HFTCORE_BUILD_BENCH)
   target_link_libraries(hftcore_bench_aggregator PRIVATE hftcore_core)
   target_compile_options(hftcore_bench_aggregator PRIVATE ${HFTCORE_WARNINGS})
   add_executable(hftcore_bench_engine bench/bench_engine.cpp)
+  add_executable(hftcore_bench_frames bench/bench_frames.cpp)
+  target_link_libraries(hftcore_bench_frames PRIVATE hftcore_core)
   target_link_libraries(hftcore_bench_engine PRIVATE hftcore_core)
   target_compile_options(hftcore_bench_engine PRIVATE ${HFTCORE_WARNINGS})
 endif()

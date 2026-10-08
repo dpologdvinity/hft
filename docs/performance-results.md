@@ -168,3 +168,16 @@ duplicate would need a 128-bit collision). All parity suites still pass.
 
 Single runs (replay: best of three) on a shared machine; tail percentiles include
 scheduler preemption from other workloads.
+
+## Native stream parsing (October 7, 2026)
+
+`hftcore.FrameRouter` parses Alpaca market-data frames with simdjson (on-demand)
+and routes each subscribed symbol's messages into its C++ market engine. Parity
+tests feed the same frames to the router and to the Python path (`json.loads`,
+stream filtering, `PyMarketEngine.on_event`) and require identical updates,
+parsed quotes (including Decimal-exact lot-to-share scaling) and malformed counts.
+
+`cpp/bench/bench_frames.cpp` (5,850,000 single-message frames, two symbols, 9,238
+decisions): **parse-to-decision p50 998 ns**, p99 10.0 µs, p99.9 53.4 µs on the
+shared machine. The live runner still uses the Python stream path; switching it is
+a follow-up once a paper session has run on the current path.

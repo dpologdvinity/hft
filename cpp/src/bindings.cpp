@@ -8,6 +8,7 @@
 
 #include "hftcore/bar_aggregator.hpp"
 #include "hftcore/decimal.hpp"
+#include "hftcore/frame_router.hpp"
 #include "hftcore/market_engine.hpp"
 #include "hftcore/replay.hpp"
 #include "hftcore/timestamp.hpp"
@@ -386,4 +387,30 @@ PYBIND11_MODULE(hftcore, m) {
         py::arg("ask"), py::arg("bid_size"), py::arg("ask_size"), py::arg("quote_ids"),
         py::arg("trade_ns"), py::arg("trade_arrival"), py::arg("price"), py::arg("size"),
         py::arg("trade_excluded"), py::arg("trade_ids"));
+
+  py::class_<FrameRouter>(m, "FrameRouter")
+      .def(py::init<>())
+      .def("add", &FrameRouter::add, py::arg("engine"), py::keep_alive<1, 2>(),
+           "Route a symbol's messages to this engine (kept alive by the router)")
+      .def(
+          "on_frame",
+          [](FrameRouter& router, py::bytes raw, std::int64_t arrival_ns) {
+            std::string_view text = raw;
+            FrameResult result;
+            try {
+              result = router.on_frame(text, arrival_ns);
+            } catch (const std::invalid_argument& error) {
+              throw py::value_error(error.what());
+            }
+            py::list updates, quotes;
+            for (const auto& [symbol, update] : result.updates) {
+              updates.append(py::make_tuple(symbol, update_object(update)));
+            }
+            for (const auto& q : result.quotes) {
+              quotes.append(py::make_tuple(q.symbol, q.quote.event_ns, q.quote.bid, q.quote.ask,
+                                           q.quote.bid_size, q.quote.ask_size));
+            }
+            return py::make_tuple(updates, quotes, result.malformed);
+          },
+          py::arg("raw"), py::arg("arrival_ns"));
 }

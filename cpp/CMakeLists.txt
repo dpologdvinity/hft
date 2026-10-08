@@ -18,7 +18,7 @@ if(HFTCORE_SANITIZE)
   add_link_options(-fsanitize=address,undefined)
 endif()
 
-add_library(hftcore_core STATIC src/version.cpp src/decimal.cpp src/timestamp.cpp src/bar_aggregator.cpp src/features.cpp src/market_engine.cpp)
+add_library(hftcore_core STATIC src/version.cpp src/decimal.cpp src/timestamp.cpp src/bar_aggregator.cpp src/features.cpp src/market_engine.cpp src/replay.cpp)
 target_include_directories(hftcore_core PUBLIC include)
 target_compile_options(hftcore_core PRIVATE ${HFTCORE_WARNINGS})
 # Bit-identical results with the Python reference: no fused multiply-add.

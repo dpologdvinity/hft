@@ -9,7 +9,7 @@ import numpy as np
 from .account import Account, Costs, Execution, decimal
 from .calendar import SessionWindow
 from .features import LOOKBACK
-from .feed import BarAggregator, historical_timeline, quote_from_event
+from .feed import historical_bars, quote_from_event
 from .risk import RiskConfig, RiskDecision, RiskGateway, Snapshot
 from .sizing import OrderIntent, SizingConfig, make_intent
 
@@ -207,25 +207,11 @@ class Simulation:
         self.latency_ms = latency_ms
         # Capture actual publication times: an event-arrival gap must never make
         # a later-published bar available to an earlier historical decision.
-        aggregator = BarAggregator(session.symbol, session=self.session)
-        bars, ready, gaps = [], [], []
-        last_event = session.open_ns
-        for event, now in historical_timeline(session):
-            if event is None:
-                completed = aggregator.advance_to(now)
-            else:
-                if now - last_event > 5 * NS:
-                    gaps.append(now)
-                last_event = now
-                completed = aggregator.add(event, now)
-            bars.extend(completed)
-            ready.extend([now] * len(completed))
-        if session.close_ns - last_event > 5 * NS:
-            gaps.append(session.close_ns)
+        bars, ready, gaps = historical_bars(session)
         self.bars = tuple(bars)
-        self._bar_ready_ns = np.asarray(ready, dtype=np.int64)
+        self._bar_ready_ns = ready
         self._bar_end_ns = np.asarray([b.end_ns for b in bars], dtype=np.int64)
-        self._gap_ns = np.asarray(gaps, dtype=np.int64)
+        self._gap_ns = gaps
         self._risk_event_ns = np.unique(np.concatenate((self._bar_ready_ns, self._gap_ns)))
         self.reset()
 

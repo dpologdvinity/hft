@@ -291,3 +291,120 @@ async def alpaca_events(symbol, feed="iex", timeout=5):
                     raise RuntimeError(f"market data stream error: {message.get('code')}")
                 if message.get("T") in ("q", "t", "c", "x") and message.get("S") == symbol:
                     yield {**message, "arrival_ns": time.time_ns()}
+
+
+def _python_historical_bars(session, bar_seconds):
+    window = SessionWindow(session.session_id, session.open_ns, session.close_ns, None)
+    aggregator = BarAggregator(session.symbol, bar_seconds, session=window)
+    bars, ready, gaps = [], [], []
+    last_event = session.open_ns
+    for event, now in historical_timeline(session, bar_seconds):
+        if event is None:
+            completed = aggregator.advance_to(now)
+        else:
+            if now - last_event > 5 * NS:
+                gaps.append(now)
+            last_event = now
+            completed = aggregator.add(event, now)
+        bars.extend(completed)
+        ready.extend([now] * len(completed))
+    if session.close_ns - last_event > 5 * NS:
+        gaps.append(session.close_ns)
+    return tuple(bars), ready, gaps
+
+
+def _id_buffers(metadata, names):
+    """Zero-copy (offsets, bytes) of the identity column the aggregator would use."""
+    import numpy as np
+    import pyarrow as pa
+
+    name = next((n for n in names if n in metadata), None)
+    if name is None:
+        return None, True
+    column = metadata[name]
+    if not isinstance(column, (pa.Array, pa.ChunkedArray)):
+        return None, False
+    array = column.combine_chunks() if isinstance(column, pa.ChunkedArray) else column
+    if array.type not in (pa.string(), pa.large_string()) or array.null_count:
+        return None, False
+    offset_type = np.int32 if array.type == pa.string() else np.int64
+    _, offsets, data = array.buffers()
+    offsets = np.frombuffer(offsets, dtype=offset_type)[
+        array.offset : array.offset + len(array) + 1
+    ]
+    data = np.frombuffer(data, dtype=np.uint8) if data is not None else np.zeros(0, np.uint8)
+    return (offsets, data), True
+
+
+def _trade_exclusions(metadata, count):
+    import numpy as np
+
+    conditions = metadata.get("c")
+    tapes = metadata.get("z")
+    conditions = [None] * count if conditions is None else _as_list(conditions)
+    tapes = None if tapes is None else _as_list(tapes)
+    excluded = np.zeros(count, dtype=np.uint8)
+    for i, codes in enumerate(conditions):
+        tape = "C" if tapes is None else tapes[i]
+        blocked = CLOSE_EXCLUDED | ({"W"} if tape == "C" else {"B"})
+        excluded[i] = any(c in blocked for c in (codes or ()))
+    return excluded
+
+
+def _as_list(column):
+    return column.to_pylist() if hasattr(column, "to_pylist") else list(column)
+
+
+def historical_bars(session, bar_seconds=5, *, implementation="auto"):
+    """Bars, publication times and feed-gap times for one historical session.
+
+    The C++ path (`hftcore.replay`) reproduces the Python loop exactly; it falls
+    back to Python for inputs it cannot view zero-copy (e.g. small Python-list
+    fixtures or null identities).
+    """
+    import numpy as np
+
+    from .market_engine import native_available
+
+    if implementation not in ("auto", "python", "cpp"):
+        raise ValueError(f"unknown replay implementation {implementation!r}")
+    use_native = implementation == "cpp" or (
+        implementation == "auto"
+        and os.environ.get("HFT_ENGINE", "auto") != "python"
+        and native_available()
+    )
+    if use_native:
+        quote_meta = session.manifest.get("quote_metadata", {})
+        trade_meta = session.manifest.get("trade_metadata", {})
+        quote_ids, quote_ok = _id_buffers(quote_meta, ("i", "quote_id"))
+        trade_ids, trade_ok = _id_buffers(trade_meta, ("i",))
+        if quote_ok and trade_ok:
+            import hftcore
+
+            rows, ready, gaps, _ = hftcore.replay(
+                session.symbol,
+                session.session_id,
+                session.open_ns,
+                session.close_ns,
+                bar_seconds,
+                session.quote_ns,
+                session.quote_arrival_ns,
+                session.bid,
+                session.ask,
+                session.bid_size,
+                session.ask_size,
+                quote_ids,
+                session.trade_ns,
+                session.trade_arrival_ns,
+                session.trade_price,
+                session.trade_size,
+                _trade_exclusions(trade_meta, len(session.trade_ns)),
+                trade_ids,
+            )
+            from .market_engine_cpp import bar_from_row
+
+            return tuple(bar_from_row(r) for r in rows), ready, gaps
+        if implementation == "cpp":
+            raise ValueError("session metadata cannot be replayed natively")
+    bars, ready, gaps = _python_historical_bars(session, bar_seconds)
+    return bars, np.asarray(ready, dtype=np.int64), np.asarray(gaps, dtype=np.int64)

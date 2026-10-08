@@ -126,3 +126,22 @@ CPU-heavy job was running (load average about 16-22 on 12 logical CPUs), so both
 figures are conservative; the ratio (about 39x) is the comparable quantity. This
 measures the aggregator alone, not a full simulation; the first C++ version still
 builds a string identity key per event, which the planned hashed-key change removes.
+
+## C++ session replay on real data (October 7, 2026)
+
+`hftcore.replay` reproduces the bar, publication-time and feed-gap construction of
+`hft.execution.Simulation` (`hft.feed.historical_bars`). It reads identities from
+the Arrow string buffers zero-copy and releases the GIL while running.
+`tests/test_replay_parity.py` requires identical bars, ready times and gap times on
+archive-schema fixtures and on real development sessions (MCD and NVDA 2026-06-04).
+
+| NVDA 2026-06-05 (5,103,471 quotes, 76,525 trades) | Seconds |
+| --- | ---: |
+| Python reference (`historical_bars(implementation="python")`) | 111.51 |
+| C++ (`historical_bars(implementation="cpp")`, including Python-side setup) | 3.14 |
+| Speedup | **35.5x** |
+
+Single run on a shared machine (load average about 15 on 12 logical CPUs), both
+paths in the same process; outputs compared equal (4,680 bars). `Simulation` uses
+the C++ path automatically when `hftcore` is installed (`HFT_ENGINE=python` forces
+the reference).

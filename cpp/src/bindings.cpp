@@ -1,3 +1,4 @@
+#include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -8,6 +9,7 @@
 #include "hftcore/bar_aggregator.hpp"
 #include "hftcore/decimal.hpp"
 #include "hftcore/market_engine.hpp"
+#include "hftcore/replay.hpp"
 #include "hftcore/timestamp.hpp"
 #include "hftcore/version.hpp"
 
@@ -210,6 +212,96 @@ Strategy parse_strategy_name(const std::string& name) {
   throw py::value_error("unknown strategy '" + name + "'");
 }
 
+template <class T>
+using Array = py::array_t<T, py::array::c_style | py::array::forcecast>;
+
+template <class T>
+std::span<const T> view(const Array<T>& a) {
+  return {a.data(), static_cast<std::size_t>(a.size())};
+}
+
+// (offsets, data) numpy views of an Arrow string column, or None.
+IdColumn id_column(const py::object& ids, std::size_t n, bool& present,
+                   std::vector<py::object>& keep) {
+  present = !ids.is_none();
+  IdColumn col;
+  if (!present) return col;
+  auto pair = ids.cast<py::tuple>();
+  py::array offsets = pair[0].cast<py::array>();
+  auto data = pair[1].cast<Array<std::uint8_t>>();
+  keep.push_back(offsets);
+  keep.push_back(data);
+  if (static_cast<std::size_t>(offsets.size()) != n + 1) throw py::value_error("id offsets size");
+  if (offsets.dtype().is(py::dtype::of<std::int32_t>())) {
+    col.offsets32 = static_cast<const std::int32_t*>(offsets.data());
+  } else if (offsets.dtype().is(py::dtype::of<std::int64_t>())) {
+    col.offsets64 = static_cast<const std::int64_t*>(offsets.data());
+  } else {
+    throw py::value_error("id offsets must be int32 or int64");
+  }
+  col.data = reinterpret_cast<const char*>(data.data());
+  col.size = n;
+  return col;
+}
+
+py::tuple replay_session(std::string symbol, std::string session_id, std::int64_t open_ns,
+                         std::int64_t close_ns, int bar_seconds, const Array<std::int64_t>& quote_ns,
+                         const py::object& quote_arrival, const Array<double>& bid,
+                         const Array<double>& ask, const Array<double>& bid_size,
+                         const Array<double>& ask_size, const py::object& quote_ids,
+                         const Array<std::int64_t>& trade_ns, const py::object& trade_arrival,
+                         const Array<double>& price, const Array<double>& size,
+                         const Array<std::uint8_t>& trade_excluded, const py::object& trade_ids) {
+  ReplayInput in;
+  std::vector<py::object> keep;
+  in.symbol = std::move(symbol);
+  in.session = Session{std::move(session_id), open_ns, close_ns};
+  in.bar_seconds = bar_seconds;
+  in.quote_ns = view(quote_ns);
+  Array<std::int64_t> qa, ta;
+  if (!quote_arrival.is_none()) {
+    qa = quote_arrival.cast<Array<std::int64_t>>();
+    in.quote_arrival = view(qa);
+  }
+  in.bid = view(bid);
+  in.ask = view(ask);
+  in.bid_size = view(bid_size);
+  in.ask_size = view(ask_size);
+  in.quote_id_column = id_column(quote_ids, in.quote_ns.size(), in.quote_ids, keep);
+  in.trade_ns = view(trade_ns);
+  if (!trade_arrival.is_none()) {
+    ta = trade_arrival.cast<Array<std::int64_t>>();
+    in.trade_arrival = view(ta);
+  }
+  in.price = view(price);
+  in.size = view(size);
+  in.trade_excluded = view(trade_excluded);
+  in.trade_id_column = id_column(trade_ids, in.trade_ns.size(), in.trade_ids, keep);
+  const std::size_t nq = in.quote_ns.size(), nt = in.trade_ns.size();
+  if (in.bid.size() != nq || in.ask.size() != nq || in.bid_size.size() != nq ||
+      in.ask_size.size() != nq || (!in.quote_arrival.empty() && in.quote_arrival.size() != nq) ||
+      in.price.size() != nt || in.size.size() != nt || in.trade_excluded.size() != nt ||
+      (!in.trade_arrival.empty() && in.trade_arrival.size() != nt)) {
+    throw py::value_error("replay array length mismatch");
+  }
+  ReplayResult result;
+  std::string error;
+  {
+    py::gil_scoped_release release;  // pure C++; Python exceptions only after reacquiring
+    try {
+      result = replay(in);
+    } catch (const std::exception& e) {
+      error = e.what();
+    }
+  }
+  if (!error.empty()) throw py::value_error(error);
+  py::list bars;
+  for (const auto& b : result.bars) bars.append(bar_tuple(b));
+  return py::make_tuple(bars, py::array_t<std::int64_t>(result.ready_ns.size(), result.ready_ns.data()),
+                        py::array_t<std::int64_t>(result.gaps_ns.size(), result.gaps_ns.data()),
+                        result.quality);
+}
+
 }  // namespace
 
 PYBIND11_MODULE(hftcore, m) {
@@ -287,4 +379,11 @@ PYBIND11_MODULE(hftcore, m) {
       .def_property_readonly("last_event_ns", &MarketEngine::last_event_ns)
       .def_property_readonly("last_tick_ns", &MarketEngine::last_tick_ns)
       .def_property_readonly("warmup_after_ns", &MarketEngine::warmup_after_ns);
+
+  m.def("replay", &replay_session, "Bars, ready times, gap times and quality for one session",
+        py::arg("symbol"), py::arg("session_id"), py::arg("open_ns"), py::arg("close_ns"),
+        py::arg("bar_seconds"), py::arg("quote_ns"), py::arg("quote_arrival"), py::arg("bid"),
+        py::arg("ask"), py::arg("bid_size"), py::arg("ask_size"), py::arg("quote_ids"),
+        py::arg("trade_ns"), py::arg("trade_arrival"), py::arg("price"), py::arg("size"),
+        py::arg("trade_excluded"), py::arg("trade_ids"));
 }

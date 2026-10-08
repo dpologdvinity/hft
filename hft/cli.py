@@ -82,6 +82,9 @@ def _parser():
     trade.add_argument("--max-drawdown", type=float, default=0.05)
     trade.add_argument("--engine", choices=["auto", "python", "cpp"], default="auto")
     trade.add_argument("--status", action="store_true", help="show runs without trading")
+    trade.add_argument(
+        "--replay", metavar="YYYY-MM-DD", help="simulate a past day instead of live paper trading"
+    )
     status = commands.add_parser("status")
     status.add_argument("--state", type=Path, default=Path(".state"))
     status.add_argument("--logs", type=Path, default=Path("logs"))

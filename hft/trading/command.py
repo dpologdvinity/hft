@@ -76,6 +76,8 @@ def handle_trade(args):
         from .status import format_status
 
         return format_status(ROOT, args.name)
+    if args.replay:
+        return handle_replay(args)
     if args.live or not args.paper:
         raise ValueError(LIVE_REFUSAL)
     budgets = parse_symbols(args.symbols)
@@ -169,3 +171,33 @@ def tail_rows(path, limit=200):
         except ValueError:
             continue  # first line may be a partial row
     return list(rows)
+
+
+def handle_replay(args):
+    """`hft trade --replay DAY`: what the bot would have done on a past session."""
+    from datetime import date
+
+    from .replay import ensure_session, format_replay, replay_stock
+
+    if args.live:
+        raise ValueError(LIVE_REFUSAL)
+    day = date.fromisoformat(args.replay).isoformat()
+    budgets = parse_symbols(args.symbols)
+    strategy = parse_strategy(args.strategy)
+    name = args.name or f"replay-{day}-" + default_name(budgets, strategy)
+    _, log_dir = run_paths(name)
+    rows = []
+    for symbol, budget in budgets.items():
+        manifest = ensure_session(symbol, day, download=_read_only_download)
+        print(f"replaying {symbol} {day} ...", flush=True)
+        rows.append(replay_stock(manifest, budget, strategy, log_dir, engine=args.engine))
+    return format_replay(rows)
+
+
+def _read_only_download(symbol, start, end, cache_dir):
+    from ..cli import _read_credentials
+    from ..history import download_sessions
+
+    _read_credentials()
+    print(f"downloading {symbol} {start} (read-only IEX history; first time only) ...", flush=True)
+    return download_sessions(symbol, start, end, cache_dir)

@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 RULE_STRATEGIES = frozenset({"ema-crossover", "hold-day"})
+# Run on a clock (orders at set times around the open and close), not on 5 s bars.
+SCHEDULED_STRATEGIES = frozenset({"overnight-drift"})
 STRATEGY_VERSION = "1"
 
 
@@ -17,13 +19,19 @@ class StrategySpec:
     def is_rule(self):
         return self.name in RULE_STRATEGIES
 
+    @property
+    def is_scheduled(self):
+        return self.name in SCHEDULED_STRATEGIES
+
 
 def parse_strategy(text: str) -> StrategySpec:
-    if text in RULE_STRATEGIES:
+    if text in RULE_STRATEGIES or text in SCHEDULED_STRATEGIES:
         return StrategySpec(text)
     if text.startswith("model:") and len(text) > len("model:"):
         return StrategySpec("model", bundle=Path(text.removeprefix("model:")))
-    raise ValueError(f"unknown strategy {text!r}; use ema-crossover, hold-day or model:<bundle>")
+    raise ValueError(
+        f"unknown strategy {text!r}; use ema-crossover, hold-day, overnight-drift or model:<bundle>"
+    )
 
 
 def rule_action(name: str, history) -> int:

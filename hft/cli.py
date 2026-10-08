@@ -75,7 +75,9 @@ def _parser():
     trade.add_argument("--live", action="store_true", help=argparse.SUPPRESS)
     trade.add_argument("--symbols", nargs="+", metavar="SYMBOL=DOLLARS")
     trade.add_argument(
-        "--strategy", default="ema-crossover", help="ema-crossover, hold-day or model:<bundle>"
+        "--strategy",
+        default="ema-crossover",
+        help="ema-crossover, hold-day, overnight-drift or model:<bundle>",
     )
     trade.add_argument("--name", help="run name (state and journals are kept per run)")
     trade.add_argument("--daily-loss", type=float, default=0.02)

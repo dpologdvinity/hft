@@ -133,16 +133,27 @@ python -m hft trade --replay 2026-10-07 --symbols NVDA=100 AAPL=100   # rerun a 
 the same engine, strategy, sizing and risk limits with simulated quote-level fills; it
 shows what the bot would have done, not broker results.
 
-Strategies: `ema-crossover`, `hold-day`, or `model:<bundle>` (a trained model, for
-the stock it was trained on). The run waits for the open, trades, goes flat before
-the close and repeats daily; Ctrl-C cancels orders, sells holdings and reconciles.
-Each stock has its own ledger and order book on one dedicated paper account; feed
-silence or a disconnect blocks new entries instead of stopping the run, and daily
-loss (2%) and drawdown (5%) limits apply per stock and across the account. New
-entries wait while the IEX bid-ask spread is wider than 10 bp (`--max-spread-bps`):
-thin IEX books post quotes far from the real market, so prefer liquid names such as
-NVDA or AAPL (about 2 bp). Exits are never blocked by spread. Real money is refused
-until a strategy passes research and 30 paper sessions.
+Bar strategies, `ema-crossover`, `hold-day` or `model:<bundle>` (a trained model,
+for the stock it was trained on), decide on 5-second bars. The run waits for the
+open, trades, goes flat before the close and repeats daily; Ctrl-C cancels orders,
+sells holdings and reconciles. Each stock has its own ledger and order book on one
+dedicated paper account; feed silence or a disconnect blocks new entries instead of
+stopping the run, and daily loss (2%) and drawdown (5%) limits apply per stock and
+across the account. New entries wait while the IEX bid-ask spread is wider than
+10 bp (`--max-spread-bps`): thin IEX books post quotes far from the real market, so
+prefer liquid names such as NVDA or AAPL (about 2 bp). Exits are never blocked by
+spread.
+
+`--strategy overnight-drift` holds overnight instead: it buys near the close and
+sells at the next open. Whole shares go through the closing and opening auctions
+(`cls` and `opg` orders, no spread); smaller budgets use fractional market orders
+just before the close and before 09:28, which Alpaca fills at the opening price.
+Stopping it cancels open orders and keeps positions, which a restart sells at the
+next open. Its backtest earned +9.09 bp per night before costs but only +0.37 bp
+after paying the spread ([results](docs/multiday-results.md)), so it is being
+judged forward on paper.
+
+Real money is refused until a strategy passes research and 30 paper sessions.
 
 ## Research workflow
 

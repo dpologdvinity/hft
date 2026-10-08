@@ -61,12 +61,15 @@ class SymbolBook(AlpacaBroker):
 
 
 class PortfolioBroker:
-    def __init__(self, client, budgets, costs, risk_factory, *, run_dir, identity, clock):
+    def __init__(
+        self, client, budgets, costs, risk_factory, *, run_dir, identity, clock, book_class=None
+    ):
         if client.mode != "broker-paper":
             raise ValueError("multi-stock trading runs on the paper account only")
         if not budgets:
             raise ValueError("at least one stock is required")
         self.client, self.clock, self.identity = client, clock, identity
+        book_class = book_class or SymbolBook
         self.budgets = {s: decimal(b) for s, b in budgets.items()}
         self.account_snapshot = client.request("GET", "/v2/account")
         self.account_id = self.account_snapshot["id"]
@@ -91,7 +94,7 @@ class PortfolioBroker:
                     raise ValueError("run identity changed; start a new run name")
                 self.remote_initial_cash = decimal(state["remote_initial_cash"])
                 for symbol, saved in state["books"].items():
-                    book = SymbolBook(
+                    book = book_class(
                         self, symbol, Account.from_state(saved["account"]), risk_factory(symbol)
                     )
                     book.risk.restore(saved["risk"])
@@ -118,7 +121,7 @@ class PortfolioBroker:
                     raise ValueError("stock budgets exceed the paper account's non-borrowed cash")
                 self.remote_initial_cash = decimal(self.account_snapshot["cash"])
                 for symbol, budget in self.budgets.items():
-                    self.books[symbol] = SymbolBook(
+                    self.books[symbol] = book_class(
                         self, symbol, Account(budget, costs), risk_factory(symbol)
                     )
             self.refresh()

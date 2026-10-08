@@ -337,6 +337,10 @@ class AlpacaBroker:
             self.pending = None
             self._save()
             return RiskDecision(False, final.reason or "stale_broker_snapshot")
+        return self._send(intent, body)
+
+    def _send(self, intent, body):
+        """POST a durably saved pending order; resolve an unknown outcome by client id."""
         try:
             result = self.client.request("POST", "/v2/orders", body)
             self.pending.id = result["id"]

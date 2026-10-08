@@ -71,7 +71,7 @@ class ReadOnlyClient:
         allowed = url == CALENDAR_URL or (
             parsed.scheme == "https"
             and parsed.netloc == "data.alpaca.markets"
-            and re.fullmatch(r"/v2/stocks/[A-Z0-9.-]+/(quotes|trades)", parsed.path)
+            and re.fullmatch(r"/v2/stocks/[A-Z0-9.-]+/(quotes|trades)(/latest)?", parsed.path)
             and not parsed.query
             and not parsed.fragment
         )

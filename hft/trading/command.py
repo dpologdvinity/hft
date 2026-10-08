@@ -106,15 +106,19 @@ def handle_trade(args):
     from .runner import TradeConfig, TradeRunner
 
     _read_credentials()
-    probe = make_market_engine(next(iter(budgets)), implementation=args.engine)
+    if strategy.is_scheduled:
+        engine, engine_version = "schedule", STRATEGY_VERSION
+    else:
+        probe = make_market_engine(next(iter(budgets)), implementation=args.engine)
+        engine, engine_version = probe.implementation, probe.version
     identity = run_identity(
         budgets,
         strategy,
         daily_loss=args.daily_loss,
         max_drawdown=args.max_drawdown,
         max_spread_bps=args.max_spread_bps,
-        engine=probe.implementation,
-        engine_version=probe.version,
+        engine=engine,
+        engine_version=engine_version,
         feed="iex",
     )
     config = TradeConfig(
@@ -134,6 +138,8 @@ def handle_trade(args):
     def calendar():
         return calendar_from_records(fetch_calendar(client))
 
+    if strategy.is_scheduled:
+        return _run_overnight(args, name, budgets, strategy, identity, client, calendar)
     broker = PortfolioBroker(
         client,
         budgets,
@@ -148,6 +154,43 @@ def handle_trade(args):
     try:
         runner = TradeRunner(config, broker, calendar(), calendar_source=calendar)
         print(f"paper trading {', '.join(budgets)} as run '{name}'; Ctrl-C to stop", flush=True)
+        return asyncio.run(_run_until_signal(runner))
+    finally:
+        broker.close()
+
+
+def _run_overnight(args, name, budgets, strategy, identity, client, calendar):
+    from .broker import PortfolioBroker
+    from .overnight import OvernightBook, OvernightConfig, OvernightRunner
+
+    state_dir, log_dir = run_paths(name)
+    broker = PortfolioBroker(
+        client,
+        budgets,
+        Costs(),
+        lambda s: budget_gateway(budgets[s], args.daily_loss, args.max_drawdown),
+        run_dir=state_dir,
+        identity=identity,
+        clock=time.time_ns,
+        book_class=OvernightBook,
+    )
+    try:
+        config = OvernightConfig(
+            name,
+            tuple(budgets),
+            budgets,
+            strategy,
+            log_dir=log_dir,
+            run_dir=state_dir,
+            daily_loss=args.daily_loss,
+            max_drawdown=args.max_drawdown,
+        )
+        runner = OvernightRunner(config, broker, calendar(), calendar_source=calendar)
+        print(
+            f"overnight paper trading {', '.join(budgets)} as run '{name}': buys near the "
+            "close, sells at the next open; Ctrl-C cancels open orders and keeps positions",
+            flush=True,
+        )
         return asyncio.run(_run_until_signal(runner))
     finally:
         broker.close()
@@ -191,6 +234,10 @@ def handle_replay(args):
     day = date.fromisoformat(args.replay).isoformat()
     budgets = parse_symbols(args.symbols)
     strategy = parse_strategy(args.strategy)
+    if strategy.is_scheduled:
+        raise ValueError(
+            "replay runs bar strategies; overnight-drift is evaluated by scripts/multiday_rules.py"
+        )
     name = args.name or f"replay-{day}-" + default_name(budgets, strategy)
     _, log_dir = run_paths(name)
     rows = []

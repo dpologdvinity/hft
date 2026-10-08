@@ -1,6 +1,6 @@
 ---
 version: alpha
-name: "HFT Research Dashboard"
+name: "Intraday Trading Engine Dashboard"
 description: "A calm local research desk for inspecting real market history, training evidence, and paper eligibility."
 colors:
   primary: "#365df3"

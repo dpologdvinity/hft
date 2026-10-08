@@ -261,7 +261,7 @@ export default function App() {
     return () => window.removeEventListener('hashchange', change);
   }, []);
   useEffect(() => {
-    document.title = `${views[view].title} — HFT`;
+    document.title = `${views[view].title} — Intraday Trading Engine`;
     if (firstView.current) firstView.current = false;
     else headingRef.current?.focus();
   }, [view]);
@@ -272,11 +272,13 @@ export default function App() {
         Skip to content
       </a>
       <aside className="sidebar">
-        <a className="brand" href="#overview" aria-label="HFT research overview">
+        <a className="brand" href="#overview" aria-label="Intraday Trading Engine overview">
           <svg viewBox="0 0 36 42" aria-hidden="true">
             <path d="M2 18h7v15l-7 4zM14 9l7 4v25l-7 4zM26 0l7 5v29l-7-4z" fill="currentColor" />
           </svg>
-          <span>HFT</span>
+          <span className="brand-name">
+            Intraday<small>Trading Engine</small>
+          </span>
         </a>
         <nav className="main-nav" aria-label="Main navigation">
           {Object.entries(views).map(([key, item]) => (

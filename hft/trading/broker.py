@@ -148,11 +148,25 @@ class PortfolioBroker:
             book.rejections = 0
 
     def poll(self):
-        return [(s, e) for s, book in self.books.items() for e in book.poll()]
+        """Fills from every book; one failing book cannot hide another book's fills."""
+        fills, self.poll_errors = [], {}
+        for symbol, book in self.books.items():
+            try:
+                fills += [(symbol, e) for e in book.poll()]
+            except (RuntimeError, OSError) as error:
+                self.poll_errors[symbol] = str(error)
+        return fills
 
     def cancel_all(self):
+        """Request every cancel, then raise the first failure."""
+        failure = None
         for book in self.books.values():
-            book.cancel()
+            try:
+                book.cancel()
+            except (RuntimeError, OSError) as error:
+                failure = failure or error
+        if failure:
+            raise failure
 
     def reconcile(self):
         positions = self.client.request("GET", "/v2/positions")

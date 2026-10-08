@@ -212,3 +212,21 @@ def test_portfolio_and_single_stock_broker_share_the_account_lock(tmp_path):
             )
     finally:
         broker.close()
+
+
+def test_one_failing_book_does_not_hide_another_books_fills(tmp_path, monkeypatch):
+    exchange = Exchange()
+    broker = portfolio(tmp_path, exchange)
+    try:
+        assert buy(broker, "NVDA").allowed and buy(broker, "AAPL").allowed
+        exchange.fill("AAPL")
+
+        def broken():
+            raise RuntimeError("lookup failed")
+
+        monkeypatch.setattr(broker.book("NVDA"), "poll", broken)
+        fills = broker.poll()
+        assert [s for s, _ in fills] == ["AAPL"]
+        assert broker.poll_errors == {"NVDA": "lookup failed"}
+    finally:
+        broker.close()

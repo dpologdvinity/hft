@@ -247,6 +247,19 @@ class TradeRunner:
     async def _poll(self):
         for symbol, execution in await asyncio.to_thread(self.broker.poll):
             self.engines[symbol].record_fills((execution,))
+        for symbol, error in getattr(self.broker, "poll_errors", {}).items():
+            self.engines[symbol].log.write(
+                "quality", event_ns=self.clock(), reason=f"poll: {error}"
+            )
+
+    async def _reconcile(self):
+        """A fill can land between the last poll and reconciliation: poll and retry once."""
+        try:
+            await asyncio.to_thread(self.broker.reconcile)
+        except RuntimeError:
+            await self._poll()
+            await asyncio.to_thread(self.broker.refresh)
+            await asyncio.to_thread(self.broker.reconcile)
 
     # Main loop -----------------------------------------------------------
     async def run(self, *, until_ns=None):
@@ -307,7 +320,7 @@ class TradeRunner:
                     self.calendar_ns = now
                 if now - last_refresh >= (5 if active else 60) * NS:
                     await asyncio.to_thread(self.broker.refresh)
-                    await asyncio.to_thread(self.broker.reconcile)
+                    await self._reconcile()
                     self.broker.save()
                     last_refresh = now
                 await self.sleep(0.1 if active else 1.0)

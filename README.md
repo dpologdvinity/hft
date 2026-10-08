@@ -9,7 +9,7 @@ policy as an immutable ONNX bundle for replay, local dry runs and gated
 Alpaca paper trading. Decisions are made every **5 seconds**; this is intraday
 research infrastructure, not colocated submillisecond execution.
 
-**Python · PyTorch / Stable-Baselines3 · Gymnasium · ONNX Runtime · PyArrow / Parquet · React / Vite**
+**Python · C++20 / pybind11 · PyTorch / Stable-Baselines3 · Gymnasium · ONNX Runtime · PyArrow / Parquet · React / Vite**
 
 > **Status:** the engineering platform is implemented and tested. The current real-data
 > experiment (82 MCD sessions) is blocked by measured feed gaps in the development
@@ -33,6 +33,13 @@ trade history, not strategy returns; the $500 allocation is simulated.
   paired block bootstrap). Final-test dates are durably reserved before their prices
   can be opened, and regression tests fail if the loader's preflight or read stages touch a
   reserved partition.
+- **C++ market-data engine (in progress).** `hftcore` ports the causal 5-second bar
+  aggregator to C++20 behind pybind11, with CMake, Catch2 and a CI job. Parity tests
+  require bit-identical output to the Python reference (down to CPython 3.12's
+  compensated float sum); the first version is about **39× faster** on a synthetic
+  NVDA-like stream. Next: features, rule strategies, native replay and stream parsing,
+  powering both backtests and a multi-stock paper-trading runner
+  ([design](docs/specs/2026-10-07-paper-trading-runner-design.md), [engine](cpp/README.md)).
 - **Measured performance work.** Profiling showed a memory-budget scan dominated
   session loading. Fixing it and loading an execution-only metadata view made a
   5.1M-quote session load **10× faster** with **63% less retained memory** and a

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["scikit-build-core==0.10.7", "pybind11==2.13.6"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "hftcore"
+version = "0.1.0"
+description = "Low-latency market-data replay and decision engine for the hft trading system"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+[tool.scikit-build]
+minimum-version = "0.10"
+cmake.version = ">=3.24"
+cmake.build-type = "Release"
+wheel.license-files = []
+
+[tool.scikit-build.cmake.define]
+HFTCORE_BUILD_TESTS = "OFF"
+HFTCORE_BUILD_PYTHON = "ON"

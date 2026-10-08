@@ -1,0 +1,49 @@
+cmake_minimum_required(VERSION 3.24)
+project(hftcore VERSION 0.1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+
+option(HFTCORE_BUILD_TESTS "Build the Catch2 unit tests" ON)
+option(HFTCORE_BUILD_PYTHON "Build the pybind11 module" OFF)
+option(HFTCORE_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+
+set(HFTCORE_WARNINGS -Wall -Wextra -Wpedantic -Werror)
+if(HFTCORE_SANITIZE)
+  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+  add_link_options(-fsanitize=address,undefined)
+endif()
+
+add_library(hftcore_core STATIC src/version.cpp)
+target_include_directories(hftcore_core PUBLIC include)
+target_compile_options(hftcore_core PRIVATE ${HFTCORE_WARNINGS})
+set_target_properties(hftcore_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+if(HFTCORE_BUILD_PYTHON)
+  find_package(Python 3.12 REQUIRED COMPONENTS Interpreter Development.Module)
+  find_package(pybind11 CONFIG REQUIRED)
+  pybind11_add_module(hftcore src/bindings.cpp)
+  target_link_libraries(hftcore PRIVATE hftcore_core)
+  target_compile_options(hftcore PRIVATE ${HFTCORE_WARNINGS})
+  install(TARGETS hftcore LIBRARY DESTINATION .)
+endif()
+
+if(HFTCORE_BUILD_TESTS)
+  include(FetchContent)
+  FetchContent_Declare(
+    Catch2
+    URL https://github.com/catchorg/Catch2/archive/refs/tags/v3.7.1.tar.gz
+    URL_HASH SHA256=c991b247a1a0d7bb9c39aa35faf0fe9e19764213f28ffba3109388e62ee0269c
+  )
+  FetchContent_MakeAvailable(Catch2)
+  add_executable(hftcore_tests tests/test_version.cpp)
+  target_link_libraries(hftcore_tests PRIVATE hftcore_core Catch2::Catch2WithMain)
+  target_compile_options(hftcore_tests PRIVATE ${HFTCORE_WARNINGS})
+  include(CTest)
+  include(Catch)
+  catch_discover_tests(hftcore_tests)
+endif()

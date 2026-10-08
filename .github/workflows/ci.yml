@@ -33,6 +33,30 @@ jobs:
       - name: Offline smoke run (synthetic PPO, ONNX export, replay)
         run: python -m hft smoke --output "$RUNNER_TEMP/smoke"
 
+  cpp:
+    name: C++ engine build and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-runtime.txt
+            requirements-train.txt
+            constraints.txt
+      - run: python -m pip install cmake ninja
+      - run: cmake -S cpp -B cpp/build -G Ninja -DHFTCORE_BUILD_TESTS=ON
+      - run: cmake --build cpp/build -j2
+      - run: ctest --test-dir cpp/build --output-on-failure
+      - run: python -m pip install -r requirements-train.txt
+      - run: python -m pip install --no-deps -e . ./cpp
+      - run: python -m pytest -q tests/test_hftcore.py
+        env:
+          HFT_REQUIRE_HFTCORE: "1"
+
   frontend:
     name: Dashboard tests and build
     runs-on: ubuntu-latest

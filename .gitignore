@@ -12,3 +12,4 @@ logs/
 :memory:.ses
 frontend/node_modules/
 frontend/dist/
+cpp/build/

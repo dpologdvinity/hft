@@ -243,3 +243,46 @@ def test_asset_class_must_explicitly_be_stock(tmp_path, asset_class):
     with pytest.raises(ValueError, match="stock"):
         setup(tmp_path, exchange)
     assert exchange.posts == 0
+
+
+def _failing_exchange(post_status, lookup_status):
+    from hft.broker import BrokerHTTPError
+
+    exchange = Exchange()
+    original = exchange.request
+
+    def request(method, path, body=None):
+        if method == "POST":
+            exchange.posts += 1
+            raise BrokerHTTPError(post_status, "POST")
+        if ":by_client_order_id?" in path:
+            raise BrokerHTTPError(lookup_status, "GET")
+        return original(method, path, body)
+
+    exchange.request = request
+    return exchange
+
+
+def test_rejected_submission_clears_pending_and_allows_new_orders(tmp_path):
+    exchange, broker, snap, intent = setup(tmp_path, _failing_exchange(422, 404))
+    try:
+        decision = broker.submit(intent, snap, NOW)
+        assert not decision.allowed and decision.reason == "broker_rejected:422"
+        assert broker.pending is None
+        assert broker.store.load()["pending"] is None
+        assert broker.rejections == 1
+        assert not broker.submit(replace(intent, client_order_id="second"), snap, NOW).allowed
+        assert exchange.posts == 2  # the account is not blocked by the first rejection
+    finally:
+        broker.close()
+
+
+@pytest.mark.parametrize(("post", "lookup"), [(500, 404), (422, 500), (429, 404)])
+def test_ambiguous_failures_keep_the_unknown_order_durable(tmp_path, post, lookup):
+    exchange, broker, snap, intent = setup(tmp_path, _failing_exchange(post, lookup))
+    try:
+        with pytest.raises(RuntimeError, match="outcome unknown"):
+            broker.submit(intent, snap, NOW)
+        assert broker.store.load()["pending"]["unknown"] is True
+    finally:
+        broker.close()

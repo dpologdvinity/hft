@@ -20,6 +20,18 @@ from .state import AccountStateStore
 NS = 1_000_000_000
 
 
+# Statuses Alpaca uses to refuse an order outright (invalid, insufficient funds).
+REJECTION_STATUSES = frozenset({400, 403, 422})
+
+
+class BrokerHTTPError(RuntimeError):
+    """An HTTP error response; the status lets callers tell refusals from unknowns."""
+
+    def __init__(self, status, method):
+        super().__init__(f"broker {method} HTTP {status}; reconcile outcome")
+        self.status = status
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         raise RuntimeError("broker redirect refused")
@@ -63,7 +75,7 @@ class AlpacaClient:
                 content = response.read()
                 return json.loads(content) if content else None
         except HTTPError as error:
-            raise RuntimeError(f"broker {method} HTTP {error.code}; reconcile outcome") from None
+            raise BrokerHTTPError(error.code, method) from None
         except (URLError, TimeoutError, ConnectionError):
             raise RuntimeError(f"broker {method} outcome unknown; reconcile before retry") from None
 
@@ -154,6 +166,7 @@ class AlpacaBroker:
         )
         self.max_live_notional = max_live_notional
         self.pending = None
+        self.rejections = 0
         self.recovered_fills = ()
         self.last_error = None
         self.live_sessions = 0
@@ -329,9 +342,14 @@ class AlpacaBroker:
             self.pending.id = result["id"]
             self._save()
             # Fills on the acknowledgement are consumed by poll once, not thrown away.
-        except (RuntimeError, OSError, KeyError):
+        except (RuntimeError, OSError, KeyError) as error:
             self.pending.unknown = True
             self._save()
+            if self._confirmed_rejection(error, intent):
+                self.pending = None
+                self.rejections += 1
+                self._save()
+                return RiskDecision(False, f"broker_rejected:{error.status}")
             try:
                 found = self.client.request(
                     "GET",
@@ -348,6 +366,22 @@ class AlpacaBroker:
                     "submitted order outcome unknown; ID saved; do not retry"
                 ) from None
         return RiskDecision(True)
+
+    def _confirmed_rejection(self, error, intent):
+        # Only a refusal status plus "no such order" proves nothing reached the book.
+        if getattr(error, "status", None) not in REJECTION_STATUSES:
+            return False
+        try:
+            self.client.request(
+                "GET",
+                "/v2/orders:by_client_order_id?"
+                + urlencode({"client_order_id": intent.client_order_id}),
+            )
+        except BrokerHTTPError as lookup:
+            return lookup.status == 404
+        except (RuntimeError, OSError):
+            return False
+        return False
 
     def apply_update(self, row, *, allow_old=False):
         if self.pending is None:

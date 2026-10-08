@@ -191,3 +191,49 @@ def test_runner_blocks_entries_while_the_stream_is_disconnected(tmp_path, monkey
     finally:
         broker.close()
     assert exchange.posts == []
+
+
+def test_runner_trades_consecutive_sessions_and_is_flat_between_them(tmp_path, monkeypatch):
+    monkeypatch.setattr("hft.runtime.time.monotonic", lambda: 0.0)
+    clock = Clock(START)
+    exchange = Exchange(clock)
+    first = SessionWindow("2025-01-06", START, START + 400 * NS)
+    second = SessionWindow("2025-01-07", START + 600 * NS, START + 1000 * NS)
+    budgets = {"NVDA": 300}
+    broker = PortfolioBroker(
+        exchange,
+        budgets,
+        Costs(0, 0),
+        lambda s: budget_gateway(300),
+        run_dir=tmp_path / "state",
+        identity="run",
+        clock=clock,
+    )
+    config = TradeConfig(
+        "test",
+        ("NVDA",),
+        budgets,
+        parse_strategy("hold-day"),
+        log_dir=tmp_path / "logs",
+        run_dir=tmp_path / "state",
+    )
+    runner = TradeRunner(
+        config,
+        broker,
+        [first, second],
+        clock=clock,
+        sleep=clock.sleep,
+        stream_factory=stream_factory(clock, 10**15),
+    )
+    try:
+        asyncio.run(runner.run(until_ns=START + 1100 * NS))
+    finally:
+        broker.close()
+    sides = [side for symbol, side in exchange.posts if symbol == "NVDA"]
+    assert sides == ["buy", "sell", "buy", "sell"]  # one round trip per session
+    assert exchange.positions["NVDA"] == 0
+    rows = [
+        json.loads(r)
+        for r in next((tmp_path / "logs").glob("NVDA-*.jsonl")).read_text().splitlines()
+    ]
+    assert [r["date"] for r in rows if r["event"] == "session"] == ["2025-01-06", "2025-01-07"]

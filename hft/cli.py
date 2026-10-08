@@ -68,6 +68,20 @@ def _parser():
             command.add_argument("--enable-live", action="store_true")
             command.add_argument("--max-live-notional", type=float)
             command.add_argument("--logs", type=Path, default=Path("logs/broker-paper"))
+    trade = commands.add_parser(
+        "trade", help="paper-trade chosen stocks every trading day until stopped"
+    )
+    trade.add_argument("--paper", action="store_true", help="trade on the Alpaca paper account")
+    trade.add_argument("--live", action="store_true", help=argparse.SUPPRESS)
+    trade.add_argument("--symbols", nargs="+", metavar="SYMBOL=DOLLARS")
+    trade.add_argument(
+        "--strategy", default="ema-crossover", help="ema-crossover, hold-day or model:<bundle>"
+    )
+    trade.add_argument("--name", help="run name (state and journals are kept per run)")
+    trade.add_argument("--daily-loss", type=float, default=0.02)
+    trade.add_argument("--max-drawdown", type=float, default=0.05)
+    trade.add_argument("--engine", choices=["auto", "python", "cpp"], default="auto")
+    trade.add_argument("--status", action="store_true", help="show runs without trading")
     status = commands.add_parser("status")
     status.add_argument("--state", type=Path, default=Path(".state"))
     status.add_argument("--logs", type=Path, default=Path("logs"))
@@ -90,6 +104,10 @@ def _read_credentials():
 
 
 def _handle(args):
+    if args.command == "trade":
+        from .trading.command import handle_trade
+
+        return handle_trade(args)
     if args.command == "dashboard":
         from .dashboard import serve
 

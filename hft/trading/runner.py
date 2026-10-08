@@ -51,10 +51,12 @@ class TradeRunner:
         clock=time.time_ns,
         sleep=asyncio.sleep,
         policy_factory=None,
+        calendar_source=None,
     ):
         self.config, self.broker, self.windows = config, broker, windows
         self.stream_factory, self.clock, self.sleep = stream_factory, clock, sleep
         self.connected = False
+        self.calendar_source, self.calendar_ns = calendar_source, clock()
         self.started_ns = clock()
         self.queued = {s: [] for s in config.symbols}
         self.silent = set()
@@ -243,12 +245,15 @@ class TradeRunner:
                 if now - last_poll >= NS:
                     await self._poll()
                     last_poll = now
-                if now - last_refresh >= 5 * NS:
+                if self.calendar_source and not active and now - self.calendar_ns > 6 * 3600 * NS:
+                    self.windows = await asyncio.to_thread(self.calendar_source)
+                    self.calendar_ns = now
+                if now - last_refresh >= (5 if active else 60) * NS:
                     await asyncio.to_thread(self.broker.refresh)
                     await asyncio.to_thread(self.broker.reconcile)
                     self.broker.save()
                     last_refresh = now
-                await self.sleep(0.1)
+                await self.sleep(0.1 if active else 1.0)
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

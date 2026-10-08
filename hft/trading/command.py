@@ -1,0 +1,171 @@
+"""`hft trade`: paper-trade chosen stocks every trading day until stopped."""
+
+import asyncio
+import hashlib
+import json
+import re
+import signal
+import time
+from collections import deque
+from dataclasses import asdict
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+
+from ..account import Costs
+from ..strategies import STRATEGY_VERSION, parse_strategy
+from .budget import budget_gateway, budget_risk_config
+from .stream import MAX_SYMBOLS
+
+SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,14}")
+RUN_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+LIVE_REFUSAL = "real money unlocks after research qualification and 30-session paper graduation"
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def parse_symbols(items) -> dict[str, Decimal]:
+    budgets = {}
+    for item in items or ():
+        symbol, sep, amount = item.partition("=")
+        symbol = symbol.strip().upper()
+        if not sep or not SYMBOL.fullmatch(symbol):
+            raise ValueError(f"expected SYMBOL=DOLLARS, got {item!r}")
+        try:
+            budget = Decimal(amount)
+        except InvalidOperation:
+            raise ValueError(f"invalid budget in {item!r}") from None
+        if not budget.is_finite() or budget <= 0:
+            raise ValueError(f"budget for {symbol} must be a positive dollar amount")
+        if symbol in budgets:
+            raise ValueError(f"{symbol} is listed twice")
+        budgets[symbol] = budget
+    if not 1 <= len(budgets) <= MAX_SYMBOLS:
+        raise ValueError(f"choose 1-{MAX_SYMBOLS} stocks with --symbols SYMBOL=DOLLARS")
+    return budgets
+
+
+def run_paths(name, root=ROOT):
+    if not RUN_NAME.fullmatch(name):
+        raise ValueError("run name may use letters, digits, '.', '_' and '-' (max 64)")
+    return root / ".state" / "trade" / name, root / "logs" / "trade" / name
+
+
+def default_name(budgets, strategy):
+    return "-".join(budgets)[:40] + "-" + strategy.name.replace(":", "")
+
+
+def run_identity(budgets, strategy, *, daily_loss, max_drawdown, engine, engine_version, feed):
+    bundle = None
+    if strategy.bundle is not None:
+        bundle = hashlib.sha256((Path(strategy.bundle) / "model.onnx").read_bytes()).hexdigest()
+    value = {
+        "budgets": {s: str(b) for s, b in budgets.items()},
+        "strategy": [strategy.name, strategy.version, bundle],
+        "engine": [engine, engine_version],
+        "risk": asdict(budget_risk_config(daily_loss, max_drawdown)),
+        "costs": asdict(Costs()),
+        "latency_ms": 75,
+        "bar_seconds": 5,
+        "feed": feed,
+    }
+    text = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def handle_trade(args):
+    if args.status:
+        from .status import format_status
+
+        return format_status(ROOT, args.name)
+    if args.live or not args.paper:
+        raise ValueError(LIVE_REFUSAL)
+    budgets = parse_symbols(args.symbols)
+    strategy = parse_strategy(args.strategy)
+    if strategy.version != STRATEGY_VERSION:
+        raise ValueError("unsupported strategy version")
+    if strategy.bundle is not None:
+        from ..policy import OnnxPolicy
+
+        if len(budgets) != 1:
+            raise ValueError("a trained model trades exactly one stock")
+        if OnnxPolicy(strategy.bundle).metadata["symbol"] != next(iter(budgets)):
+            raise ValueError("the model was trained for a different stock")
+    name = args.name or default_name(budgets, strategy)
+    state_dir, log_dir = run_paths(name)
+
+    from ..broker import AlpacaClient
+    from ..calendar import calendar_from_records
+    from ..cli import _read_credentials
+    from ..market_engine import make_market_engine
+    from ..runtime import fetch_calendar
+    from .broker import PortfolioBroker
+    from .runner import TradeConfig, TradeRunner
+
+    _read_credentials()
+    probe = make_market_engine(next(iter(budgets)), implementation=args.engine)
+    identity = run_identity(
+        budgets,
+        strategy,
+        daily_loss=args.daily_loss,
+        max_drawdown=args.max_drawdown,
+        engine=probe.implementation,
+        engine_version=probe.version,
+        feed="iex",
+    )
+    config = TradeConfig(
+        name,
+        tuple(budgets),
+        budgets,
+        strategy,
+        log_dir=log_dir,
+        run_dir=state_dir,
+        daily_loss=args.daily_loss,
+        max_drawdown=args.max_drawdown,
+        engine=args.engine,
+    )
+    client = AlpacaClient("broker-paper")
+
+    def calendar():
+        return calendar_from_records(fetch_calendar(client))
+
+    broker = PortfolioBroker(
+        client,
+        budgets,
+        Costs(),
+        lambda s: budget_gateway(budgets[s], args.daily_loss, args.max_drawdown),
+        run_dir=state_dir,
+        identity=identity,
+        clock=time.time_ns,
+    )
+    try:
+        runner = TradeRunner(config, broker, calendar(), calendar_source=calendar)
+        print(f"paper trading {', '.join(budgets)} as run '{name}'; Ctrl-C to stop", flush=True)
+        return asyncio.run(_run_until_signal(runner))
+    finally:
+        broker.close()
+
+
+async def _run_until_signal(runner):
+    task = asyncio.create_task(runner.run())
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, task.cancel)
+    try:
+        return await task
+    except asyncio.CancelledError:
+        return {"stopped": True, **runner.summary()}
+
+
+def tail_rows(path, limit=200):
+    """Last journal rows without reading a whole (possibly large) file."""
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(max(0, size - 256 * 1024))
+        lines = f.read().splitlines()[-limit:]
+    rows = deque()
+    for line in lines:
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            continue  # first line may be a partial row
+    return list(rows)

@@ -150,9 +150,10 @@ sells at the next open. Whole shares go through the closing and opening auctions
 use fractional limit orders just before the close and market orders before 09:28,
 which Alpaca fills at the opening price.
 Stopping it cancels open orders and keeps positions, which a restart sells at the
-next open. Its backtest earned +9.09 bp per night before costs but only +0.37 bp
-after paying the spread ([results](docs/multiday-results.md)), so it is being
-judged forward on paper.
+next open. Over 2016-2024 the overnight effect was real before costs (+5.88 bp per
+night) but a pre-registered test with about 4 bp of auction costs per round trip
+did not clear zero ([results](docs/overnight-auction-results.md)), so the paper run
+proves the order flow; it is not evidence of an edge.
 
 Real money is refused until a strategy passes research and 30 paper sessions.
 
@@ -177,7 +178,7 @@ replay, dry runs, broker paper trading, graduation and live activation.
 - [Operations guide](docs/operations.md): commands and operating contracts.
 - [Trading specification](docs/trading-spec.md): execution, risk, research and graduation contracts.
 - [Architecture](docs/architecture.md) and [demo walkthrough](docs/demo.md).
-- [Performance results](docs/performance-results.md), [replay results](docs/replay-results.md), [intraday momentum results](docs/intraday-momentum-results.md), [overnight and multi-day results](docs/multiday-results.md), [development readiness results](docs/research-readiness-results.md)
+- [Performance results](docs/performance-results.md), [replay results](docs/replay-results.md), [intraday momentum results](docs/intraday-momentum-results.md), [overnight and multi-day results](docs/multiday-results.md), [overnight auction results](docs/overnight-auction-results.md), [development readiness results](docs/research-readiness-results.md)
   and [free-data suitability results](docs/free-data-suitability-results.md).
 - [Research roadmap](docs/research-improvement-roadmap.md) and [dashboard design system](DESIGN.md).
 

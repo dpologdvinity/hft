@@ -62,8 +62,8 @@ Both rules fail their pre-registered criteria and are not added to the engine.
   non-overlapping weeks on 46 stocks cannot detect an effect of this size. That is
   a power limit, not evidence of an edge.
 
-Across four pre-registered tests (EMA replays, intraday momentum, overnight drift
-and weekly reversal), no long-only rule on these liquid stocks clears the
+Across the EMA replays and three pre-registered tests (intraday momentum,
+overnight drift and weekly reversal), no long-only rule on these liquid stocks clears the
 round-trip cost with statistical confidence. The closest is overnight drift,
 whose gross size roughly equals the cost. Lowering the cost would matter more
 than finding another signal: the 09:30 open-bucket half-spread (median 2.67 bp)

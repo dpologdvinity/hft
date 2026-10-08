@@ -113,7 +113,32 @@ class PyMarketEngine:
         return BarUpdate(self.symbol, bar, now_ns, True, reset, ready, market, action)
 
 
+NATIVE_VERSION = "0.1.0"  # hftcore version whose outputs are proven identical
+
+
+def native_available():
+    try:
+        import hftcore
+    except ImportError:
+        return False
+    return hftcore.version() == NATIVE_VERSION
+
+
 def make_market_engine(symbol, strategy="model", *, implementation="auto", bar_seconds=5):
-    if implementation not in ("auto", "python"):
+    """C++ engine when installed and proven identical, else the Python reference.
+
+    `HFT_ENGINE=python|cpp` overrides "auto"; requesting "cpp" without the module fails.
+    """
+    import os
+
+    if implementation == "auto":
+        implementation = os.environ.get("HFT_ENGINE", "auto")
+    if implementation not in ("auto", "python", "cpp"):
         raise ValueError(f"unknown engine implementation {implementation!r}")
+    if implementation == "cpp" or (implementation == "auto" and native_available()):
+        if not native_available():
+            raise ImportError(f"hftcore {NATIVE_VERSION} is not installed; pip install ./cpp")
+        from .market_engine_cpp import CppMarketEngine
+
+        return CppMarketEngine(symbol, strategy, bar_seconds)
     return PyMarketEngine(symbol, strategy, bar_seconds)

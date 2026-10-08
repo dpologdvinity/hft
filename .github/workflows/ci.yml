@@ -53,9 +53,11 @@ jobs:
       - run: ctest --test-dir cpp/build --output-on-failure
       - run: python -m pip install -r requirements-train.txt
       - run: python -m pip install --no-deps -e . ./cpp
-      - run: python -m pytest -q tests/test_hftcore.py tests/test_engine_parity.py
+      - name: Full test suite on the C++ engine
+        run: python -m pytest -q
         env:
           HFT_REQUIRE_HFTCORE: "1"
+          HFT_ENGINE: cpp
 
   frontend:
     name: Dashboard tests and build

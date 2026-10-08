@@ -37,6 +37,7 @@ class PaperEngine:
         outstanding=None,
         clock=time.time_ns,
         market_engine=None,
+        intent_factory=make_intent,
     ):
         self.policy, self.symbol = policy, symbol
         self.account = account or Account(initial_cash, costs or Costs())
@@ -50,6 +51,7 @@ class PaperEngine:
         self.outstanding = outstanding or (lambda: self.execution.pending is not None)
         self.market = market_engine or make_market_engine(symbol, bar_seconds=bar_seconds)
         self.last_update = None
+        self.intent_factory = intent_factory
         self.log = EventLog(log_path, clock=clock)
         self.source, self.synthetic = source, synthetic
         self.session = self.quote = None
@@ -125,7 +127,7 @@ class PaperEngine:
     def _submit(self, action, now_ns, *, emergency=False):
         if self.quote is None or self.outstanding():
             return None
-        intent = make_intent(
+        intent = self.intent_factory(
             action,
             self.account,
             self.quote,

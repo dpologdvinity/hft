@@ -63,8 +63,12 @@ class RiskDecision:
 
 
 class RiskGateway:
-    def __init__(self, config=None, blackouts=()):
+    def __init__(self, config=None, blackouts=(), *, entry_cap=None):
         self.config = config or RiskConfig()
+        # Budget runs cap each entry in dollars instead of a fraction of equity.
+        self.entry_cap = None if entry_cap is None else decimal(entry_cap)
+        if self.entry_cap is not None and (not self.entry_cap.is_finite() or self.entry_cap <= 0):
+            raise ValueError("entry cap must be positive")
         self.blackouts = tuple(blackouts)
         if any(a >= b for a, b in blackouts):
             raise ValueError("invalid blackout")
@@ -159,7 +163,12 @@ class RiskGateway:
             return RiskDecision(False, "news_blackout")
         if now_ns < self.breaker_until:
             return RiskDecision(False, "volatility_breaker")
-        if q * p > self.day_start * decimal(self.config.entry_allocation):
+        limit = (
+            self.day_start * decimal(self.config.entry_allocation)
+            if self.entry_cap is None
+            else self.entry_cap
+        )
+        if q * p > limit:
             return RiskDecision(False, "exposure_limit")
         if q * p > snapshot.available_cash or q * p > snapshot.equity:
             return RiskDecision(False, "cash_limit")

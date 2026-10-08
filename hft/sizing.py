@@ -50,6 +50,31 @@ class OrderIntent:
 
 
 def make_intent(action, account, quote, limits, now_ns, *, symbol="SPY", emergency=False):
+    budget = min(
+        account.session_start_equity * decimal(limits.allocation_fraction),
+        decimal(limits.max_entry_notional),
+        account.cash,
+    )
+    return _intent(action, account, quote, limits, now_ns, budget, symbol, emergency)
+
+
+def make_budget_intent(
+    action, account, quote, limits, now_ns, *, budget, symbol="SPY", emergency=False
+):
+    """Entry sized from a fixed dollar budget (paper budget runs), never above cash."""
+    return _intent(
+        action,
+        account,
+        quote,
+        limits,
+        now_ns,
+        min(decimal(budget), account.cash),
+        symbol,
+        emergency,
+    )
+
+
+def _intent(action, account, quote, limits, now_ns, budget, symbol, emergency):
     if isinstance(action, bool) or action not in (0, 1):
         raise ValueError("action must be flat or long")
     if action == 1 and account.position > 0 or action == 0 and account.position == 0:
@@ -60,11 +85,6 @@ def make_intent(action, account, quote, limits, now_ns, *, symbol="SPY", emergen
         decimal(limits.price_precision), rounding=ROUND_UP if buy else ROUND_DOWN
     )
     if buy:
-        budget = min(
-            account.session_start_equity * decimal(limits.allocation_fraction),
-            decimal(limits.max_entry_notional),
-            account.cash,
-        )
         quantity = (budget / (price + decimal(limits.fee_per_share))).quantize(
             decimal(limits.quantity_precision), rounding=ROUND_DOWN
         )

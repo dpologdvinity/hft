@@ -279,7 +279,7 @@ def test_rejected_submission_clears_pending_and_allows_new_orders(tmp_path):
 
 @pytest.mark.parametrize(("post", "lookup"), [(500, 404), (422, 500), (429, 404)])
 def test_ambiguous_failures_keep_the_unknown_order_durable(tmp_path, post, lookup):
-    exchange, broker, snap, intent = setup(tmp_path, _failing_exchange(post, lookup))
+    _exchange, broker, snap, intent = setup(tmp_path, _failing_exchange(post, lookup))
     try:
         with pytest.raises(RuntimeError, match="outcome unknown"):
             broker.submit(intent, snap, NOW)

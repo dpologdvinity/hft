@@ -276,3 +276,46 @@ def test_price_failures_are_logged_and_skip_entries_without_stopping(tmp_path):
     assert exchange.posts == [] and summary["BIG"]["position"] == "0"
     reasons = [r.get("reason", "") for r in _rows(tmp_path, "BIG")]
     assert any("market data unavailable" in r for r in reasons)
+
+
+def test_the_cli_starts_an_overnight_run_on_the_paper_account(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from hft.trading import command
+
+    clock = Clock(START)
+    exchange = Exchange(clock, prices)
+    started = {}
+
+    async def run_once(runner):
+        started["runner"] = runner
+        return runner.summary()
+
+    monkeypatch.setattr("hft.broker.AlpacaClient", lambda mode: exchange)
+    monkeypatch.setattr("hft.cli._read_credentials", lambda: None)
+    monkeypatch.setattr("hft.runtime.fetch_calendar", lambda client: [DAY1, DAY2])
+    monkeypatch.setattr("hft.calendar.calendar_from_records", lambda records: list(records))
+    monkeypatch.setattr(command, "_run_until_signal", run_once)
+    monkeypatch.setattr(command, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        command, "run_paths", lambda name: (tmp_path / "state" / name, tmp_path / "logs" / name)
+    )
+    args = SimpleNamespace(
+        status=False,
+        replay=None,
+        live=False,
+        paper=True,
+        symbols=["BIG=1000", "SMALL=100"],
+        strategy="overnight-drift",
+        name="night",
+        daily_loss=0.02,
+        max_drawdown=0.05,
+        max_spread_bps=10.0,
+        engine="auto",
+        frames="python",
+    )
+    summary = command.handle_trade(args)
+    runner = started["runner"]
+    assert type(runner).__name__ == "OvernightRunner"
+    assert type(runner.broker.book("BIG")).__name__ == "OvernightBook"
+    assert set(summary) == {"BIG", "SMALL"}

@@ -1,6 +1,6 @@
-# HFT — Intraday Trading Research Platform
+# Intraday Trading Engine
 
-[![CI](https://github.com/dpologdvinity/hft/actions/workflows/ci.yml/badge.svg)](https://github.com/dpologdvinity/hft/actions/workflows/ci.yml)
+[![CI](https://github.com/dpologdvinity/intraday-trading-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/dpologdvinity/intraday-trading-engine/actions/workflows/ci.yml)
 
 A local, CPU-only research system for intraday stock trading. It replays historical
 quote and trade events through a causal execution simulator, trains PPO policies

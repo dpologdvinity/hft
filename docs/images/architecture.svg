@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1040" viewBox="0 0 1200 1040" role="img" aria-labelledby="title description">
-  <title id="title">HFT intraday research platform architecture</title>
+  <title id="title">Intraday Trading Engine architecture</title>
   <desc id="description">Checked stock-market archives and frozen experiments support a shared causal core. Development diagnostics gate PPO research and reserved final evaluation. Verified ONNX actors support replay and separately authorized broker workflows, with persistent state and checked journals. A read-only local dashboard observes development history, reports, and journals. The current real-data run stops at diagnostics; no model has qualified.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 Z" fill="#365df3"/></marker>
@@ -17,7 +17,7 @@
     </style>
   </defs>
   <rect width="1200" height="1040" rx="16" fill="#f4f7fc"/>
-  <text x="56" y="54" class="heading">HFT · Intraday trading research</text>
+  <text x="56" y="54" class="heading">Intraday Trading Engine</text>
   <text x="56" y="82" class="body">Local CPU execution · five-second decisions · evidence before activation</text>
 
   <text x="56" y="118" class="section">Acquisition and experiment identity</text>

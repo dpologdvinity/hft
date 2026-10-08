@@ -1,11 +1,11 @@
 # Architecture
 
-HFT is a local, stocks-only intraday research platform with five-second decisions.
+Intraday Trading Engine is a local, stocks-only intraday research platform with five-second decisions.
 It connects archived market events to reproducible PPO research and separately
 gated trading workflows. The current MCD experiment stops at development data
 diagnostics; the downstream capabilities below do not imply a qualified model.
 
-![HFT architecture with acquisition, shared causal behavior, gated research, ONNX deployment, persisted evidence, and a read-only dashboard.](images/architecture.svg)
+![Architecture with acquisition, shared causal behavior, gated research, ONNX deployment, persisted evidence, and a read-only dashboard.](images/architecture.svg)
 
 ## Editable flow
 
@@ -15,7 +15,7 @@ The static SVG above is the presentation version.
 
 ```mermaid
 flowchart TD
-    accTitle: HFT research and runtime architecture
+    accTitle: Trading engine research and runtime architecture
     accDescr: Checked stock-market archives feed development diagnostics and chronological research. Final prices require reservation before normal evaluation. Verified ONNX bundles feed local replay or separately authorized broker workflows. Shared causal behavior supports research and runtime. The dashboard reads development history, reports, and journals without order controls.
 
     source["Historical REST data / recorded WebSocket events"] --> archive["Checked Parquet archives and session manifests"]

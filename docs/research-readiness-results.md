@@ -128,12 +128,12 @@ No projection or feed-health change is implemented here.
 
 After completing diagnostics, reviewed [stock-analyzer integration](stock-analyzer-integration.md).
 Keep its pinned causal NumPy bullish-engulfing/prior-downtrend baseline as a
-**separate follow-up after data readiness**. Use HFT completed history, quote
+**separate follow-up after data readiness**. Use the project's completed history, quote
 execution, chronological development folds and controls; pin source/defaults,
 prove future-bar independence and define exits before evaluation. No sibling
 repository edits, detector extraction, PPO features or baseline comparison were
 performed in this project. The analyzer's OHLC executor and heuristic verdicts
-cannot replace HFT accounting or qualification.
+cannot replace this project's accounting or qualification.
 
 ## Verification
 

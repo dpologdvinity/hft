@@ -49,7 +49,7 @@ components:
     textColor: "{colors.rail-text}"
 ---
 
-# HFT Research Dashboard Design System
+# Trading Dashboard Design System
 
 ## Overview
 

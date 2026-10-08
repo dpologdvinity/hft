@@ -237,6 +237,21 @@ class TradeRunner:
                     engine.risk.permanent_halt |= reason == "account_drawdown"
                     engine.log.write("halt", event_ns=self.clock(), reason=reason)
 
+    async def _io(self, func, *args):
+        """Run a blocking broker call off the loop, then route the market events that
+        queued meanwhile, so REST latency cannot age events past the backlog limit."""
+        result = await asyncio.to_thread(func, *args)
+        self._drain()
+        return result
+
+    def _drain(self):
+        queue = getattr(self, "queue", None)
+        while queue is not None and not queue.empty():
+            if self.router is not None:
+                self._route_frame(*queue.get_nowait(), self.clock())
+            else:
+                self._route(queue.get_nowait(), self.clock())
+
     async def _submit_queued(self):
         for symbol, queued in self.queued.items():
             if not queued:
@@ -244,7 +259,7 @@ class TradeRunner:
             intent = queued.pop(0)
             engine, book = self.engines[symbol], self.broker.book(symbol)
             snapshot = replace(engine.snapshot())
-            decision = await asyncio.to_thread(book.submit, intent, lambda s=snapshot: s)
+            decision = await self._io(book.submit, intent, lambda s=snapshot: s)
             engine.log.write(
                 "broker_submit",
                 event_ns=self.clock(),
@@ -253,7 +268,7 @@ class TradeRunner:
             )
 
     async def _poll(self):
-        for symbol, execution in await asyncio.to_thread(self.broker.poll):
+        for symbol, execution in await self._io(self.broker.poll):
             self.engines[symbol].record_fills((execution,))
         for symbol, error in getattr(self.broker, "poll_errors", {}).items():
             self.engines[symbol].log.write(
@@ -263,15 +278,15 @@ class TradeRunner:
     async def _reconcile(self):
         """A fill can land between the last poll and reconciliation: poll and retry once."""
         try:
-            await asyncio.to_thread(self.broker.reconcile)
+            await self._io(self.broker.reconcile)
         except RuntimeError:
             await self._poll()
-            await asyncio.to_thread(self.broker.refresh)
-            await asyncio.to_thread(self.broker.reconcile)
+            await self._io(self.broker.refresh)
+            await self._io(self.broker.reconcile)
 
     # Main loop -----------------------------------------------------------
     async def run(self, *, until_ns=None):
-        queue = asyncio.Queue(maxsize=4096)
+        self.queue = queue = asyncio.Queue(maxsize=4096)
 
         native = self.router is not None
         options = {"raw": True} if native else {}
@@ -308,11 +323,7 @@ class TradeRunner:
                 if session and not active:
                     self._start_session(session, now)
                     active = session
-                while not queue.empty():
-                    if native:
-                        self._route_frame(*queue.get_nowait(), self.clock())
-                    else:
-                        self._route(queue.get_nowait(), self.clock())
+                self._drain()
                 now = self.clock()
                 if active:
                     self._check_silence(now)
@@ -324,10 +335,10 @@ class TradeRunner:
                     await self._poll()
                     last_poll = now
                 if self.calendar_source and not active and now - self.calendar_ns > 6 * 3600 * NS:
-                    self.windows = await asyncio.to_thread(self.calendar_source)
+                    self.windows = await self._io(self.calendar_source)
                     self.calendar_ns = now
                 if now - last_refresh >= (5 if active else 60) * NS:
-                    await asyncio.to_thread(self.broker.refresh)
+                    await self._io(self.broker.refresh)
                     await self._reconcile()
                     self.broker.save()
                     last_refresh = now

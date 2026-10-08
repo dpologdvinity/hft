@@ -426,3 +426,56 @@ def test_a_brief_backlog_restarts_warmup_instead_of_halting_the_day(tmp_path, mo
     ]
     assert [r.get("reason") for r in rows].count("processing_backlog") == 1
     assert ("NVDA", "buy") in exchange.posts  # warmed up again and traded the same day
+
+
+def test_rest_latency_does_not_age_market_events_into_a_backlog(tmp_path, monkeypatch):
+    """The third paper session reset warmup 30 times in three hours: events waited in
+    the queue while the loop made ~0.5 s of sequential REST calls."""
+    monkeypatch.setattr("hft.runtime.time.monotonic", lambda: 0.0)
+    clock = Clock(START)
+
+    class SlowExchange(Exchange):
+        def request(self, method, path, body=None):
+            self.clock.now += 300_000_000  # 0.3 s per REST call
+            return super().request(method, path, body)
+
+    exchange = SlowExchange(clock)
+    budgets = {"NVDA": 300}
+    broker = PortfolioBroker(
+        exchange,
+        budgets,
+        Costs(0, 0),
+        lambda s: budget_gateway(300),
+        run_dir=tmp_path / "state",
+        identity="run",
+        clock=clock,
+    )
+    config = TradeConfig(
+        "test",
+        ("NVDA",),
+        budgets,
+        parse_strategy("hold-day"),
+        log_dir=tmp_path / "logs",
+        run_dir=tmp_path / "state",
+    )
+    events = stream_factory(clock, 10**15)
+
+    async def received(symbols, *, feed):
+        # Stamp arrival when the receive task gets the event, as the live stream does.
+        async for kind, message, _ in events(symbols, feed=feed):
+            now = clock()
+            yield kind, ({**message, "arrival_ns": now} if message else message), now
+
+    runner = TradeRunner(
+        config, broker, [SESSION], stream_factory=received, clock=clock, sleep=clock.sleep
+    )
+    try:
+        asyncio.run(runner.run(until_ns=START + 420 * NS))
+    finally:
+        broker.close()
+    rows = [
+        json.loads(r)
+        for r in next((tmp_path / "logs").glob("NVDA-*.jsonl")).read_text().splitlines()
+    ]
+    assert [r.get("reason") for r in rows].count("processing_backlog") == 0
+    assert ("NVDA", "buy") in exchange.posts

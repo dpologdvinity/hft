@@ -198,14 +198,17 @@ Bar strategies decide on 5-second bars and are flat at every close. Stopping one
 | --- | --- |
 | 09:00-09:27:30 | Sell held stock: `opg` market order for whole shares, day market order otherwise |
 | After 09:30 | Sell anything still held with a day market order, retried each minute |
-| 15:45-15:49:30 | Buy with a `cls` market order when whole shares use at least 90% of the stock's cash |
-| 15:57-15:59 | Buy the other stocks with fractional day market orders |
+| 15:45-15:49:30 | Buy with a `cls` limit-on-close order (2% above the last trade) when whole shares use at least 90% of the stock's cash |
+| 15:57-15:59 | Buy the other stocks, or any whose on-close order failed, with fractional marketable day limits (1% above) |
 
 The times move with early closes. Before each entry the account-wide guard marks
 holdings at the latest IEX trade: losing the daily limit since the previous entry
 skips that day's entries, and the drawdown limit stops entries for good. Exits are
-never blocked. Stopping the run cancels open orders but keeps positions, because the
-market is usually closed; restarting it sells them at the next open.
+never blocked, and buy quantity x limit always fits the stock's cash. Broker,
+network and market-data errors are logged as `quality` rows and retried; only a
+reconciliation mismatch that survives a fresh poll stops the run. Stopping the run
+cancels open orders but keeps positions, because the market is usually closed;
+restarting it sells them at the next open.
 
 Journals go to `logs/trade/<name>/<SYMBOL>-<start_ns>.jsonl` and state to
 `.state/trade/<name>/`. Rule-strategy runs are engineering evidence only and never

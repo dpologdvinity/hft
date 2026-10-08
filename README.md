@@ -146,8 +146,9 @@ spread.
 
 `--strategy overnight-drift` holds overnight instead: it buys near the close and
 sells at the next open. Whole shares go through the closing and opening auctions
-(`cls` and `opg` orders, no spread); smaller budgets use fractional market orders
-just before the close and before 09:28, which Alpaca fills at the opening price.
+(`cls` limit-on-close and `opg` market-on-open orders, no spread); smaller budgets
+use fractional limit orders just before the close and market orders before 09:28,
+which Alpaca fills at the opening price.
 Stopping it cancels open orders and keeps positions, which a restart sells at the
 next open. Its backtest earned +9.09 bp per night before costs but only +0.37 bp
 after paying the spread ([results](docs/multiday-results.md)), so it is being

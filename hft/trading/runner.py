@@ -55,6 +55,7 @@ class TradeRunner:
         self.config, self.broker, self.windows = config, broker, windows
         self.stream_factory, self.clock, self.sleep = stream_factory, clock, sleep
         self.connected = False
+        self.started_ns = clock()
         self.queued = {s: [] for s in config.symbols}
         self.silent = set()
         self.guard = AccountGuard(
@@ -83,7 +84,7 @@ class TradeRunner:
 
         engine = PaperEngine(
             None,
-            log_path=self.config.log_dir / f"{symbol}.jsonl",
+            log_path=self.config.log_dir / f"{symbol}-{self.started_ns}.jsonl",
             initial_cash=book.account.initial_cash,
             costs=book.account.costs,
             risk=book.risk,
@@ -107,6 +108,7 @@ class TradeRunner:
             clock=self.clock,
             market_engine=market,
             intent_factory=budget_intent_factory(book.account.initial_cash),
+            log_market=False,
         )
         if policy_factory is not None:
             engine.policy = policy_factory(symbol)

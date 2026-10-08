@@ -149,7 +149,8 @@ def test_runner_trades_one_stock_and_survives_silence_on_another(tmp_path, monke
     assert not any(symbol == "AAPL" for symbol, _ in exchange.posts)  # silent stock never traded
     assert Decimal(summary["NVDA"]["position"]) == 0
     aapl = [
-        json.loads(line) for line in (tmp_path / "logs" / "AAPL.jsonl").read_text().splitlines()
+        json.loads(line)
+        for line in next((tmp_path / "logs").glob("AAPL-*.jsonl")).read_text().splitlines()
     ]
     assert any(r.get("reason") == "feed_silence" for r in aapl)
 

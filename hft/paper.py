@@ -38,6 +38,7 @@ class PaperEngine:
         clock=time.time_ns,
         market_engine=None,
         intent_factory=make_intent,
+        log_market=True,
     ):
         self.policy, self.symbol = policy, symbol
         self.account = account or Account(initial_cash, costs or Costs())
@@ -52,6 +53,8 @@ class PaperEngine:
         self.market = market_engine or make_market_engine(symbol, bar_seconds=bar_seconds)
         self.last_update = None
         self.intent_factory = intent_factory
+        # Raw market rows make journals replayable evidence; trade runs skip them.
+        self.log_market = log_market
         self.log = EventLog(log_path, clock=clock)
         self.source, self.synthetic = source, synthetic
         self.session = self.quote = None
@@ -172,6 +175,8 @@ class PaperEngine:
             self.record_fills(
                 self.execution.on_quote(quote, now_ns, tuple(self.history), self.session)
             )
+        if not self.log_market:
+            return  # equity is still journaled once per bar
         self.log.write(
             "equity",
             event_ns=now_ns,
@@ -249,7 +254,10 @@ class PaperEngine:
     def on_event(self, event, arrival_ns):
         if self.session is None:
             raise ValueError("start a session before market events")
-        self.log.write("market", event_ns=arrival_ns, payload={**event, "arrival_ns": arrival_ns})
+        if self.log_market:
+            self.log.write(
+                "market", event_ns=arrival_ns, payload={**event, "arrival_ns": arrival_ns}
+            )
         updates = self.market.on_event(event, arrival_ns)
         self.first_event_ns = self.first_event_ns or arrival_ns
         for update in updates:

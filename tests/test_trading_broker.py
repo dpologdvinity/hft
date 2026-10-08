@@ -85,11 +85,11 @@ def portfolio(tmp_path, exchange, budgets=None, identity="run-a"):
     )
 
 
-def buy(broker, symbol):
+def buy(broker, symbol, action=1):
     book = broker.book(symbol)
     quote = Quote("q", NOW, NOW, Decimal("99.99"), Decimal("100.01"), Decimal(500), Decimal(500))
     intent = make_budget_intent(
-        1, book.account, quote, LIMITS, NOW, budget=book.account.initial_cash, symbol=symbol
+        action, book.account, quote, LIMITS, NOW, budget=book.account.initial_cash, symbol=symbol
     )
 
     def snapshot():
@@ -228,5 +228,27 @@ def test_one_failing_book_does_not_hide_another_books_fills(tmp_path, monkeypatc
         fills = broker.poll()
         assert [s for s, _ in fills] == ["AAPL"]
         assert broker.poll_errors == {"NVDA": "lookup failed"}
+    finally:
+        broker.close()
+
+
+def test_reconcile_allows_the_brokers_per_fill_cent_rounding(tmp_path):
+    """The first paper session stopped on a $0.012 drift after eight fills: the broker
+    books each fill's cash to the cent, the ledger keeps exact decimals."""
+    exchange = Exchange()
+    broker = portfolio(tmp_path, exchange)
+    try:
+        account = broker.book("NVDA").account
+        for _ in range(3):  # each round trip leaves the broker 0.8 cents above the ledger
+            account.execute(1, Decimal("100.004"), 0, NOW)
+            exchange.positions["NVDA"] = Decimal(1)
+            exchange.cash -= Decimal("100.00")
+            account.execute(-1, Decimal("100.006"), 0, NOW)
+            exchange.positions["NVDA"] = Decimal(0)
+            exchange.cash += Decimal("100.01")
+            assert broker.reconcile()
+        exchange.cash -= Decimal("0.05")  # an unexplained charge is still caught
+        with pytest.raises(RuntimeError, match="cash mismatch"):
+            broker.reconcile()
     finally:
         broker.close()

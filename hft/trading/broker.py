@@ -10,7 +10,7 @@ configured stock plus the account cash.
 from decimal import Decimal
 
 from ..account import Account, decimal
-from ..broker import AlpacaBroker, BrokerOrder
+from ..broker import AlpacaBroker, BrokerOrder, cash_tolerance
 from ..risk import RiskDecision
 from ..state import AccountStateStore
 
@@ -95,6 +95,7 @@ class PortfolioBroker:
                 if state["identity"] != identity:
                     raise ValueError("run identity changed; start a new run name")
                 self.remote_initial_cash = decimal(state["remote_initial_cash"])
+                self.cash_anchor = state.get("cash_anchor")
                 for symbol, saved in state["books"].items():
                     book = book_class(
                         self, symbol, Account.from_state(saved["account"]), risk_factory(symbol)
@@ -122,6 +123,7 @@ class PortfolioBroker:
                 if sum(self.budgets.values(), Decimal(0)) > free:
                     raise ValueError("stock budgets exceed the paper account's non-borrowed cash")
                 self.remote_initial_cash = decimal(self.account_snapshot["cash"])
+                self.cash_anchor = None
                 for symbol, budget in self.budgets.items():
                     self.books[symbol] = book_class(
                         self, symbol, Account(budget, costs), risk_factory(symbol)
@@ -184,11 +186,20 @@ class PortfolioBroker:
                 raise RuntimeError(f"unexpected broker order: {order.get('symbol')}")
         snapshot = self.client.request("GET", "/v2/account")
         AlpacaBroker._active_account(snapshot)
-        expected = self.remote_initial_cash + sum(
-            (b.account.cash - b.account.initial_cash for b in self.books.values()), Decimal(0)
-        )
-        if abs(decimal(snapshot["cash"]) - expected) > Decimal(".01"):
+        # Compare cash changes since the last clean reconciliation, allowing the broker's
+        # per-fill cent rounding, then re-anchor so the tolerance never accumulates.
+        ledger = sum((b.account.cash for b in self.books.values()), Decimal(0))
+        fills = sum(len(b.account.fills) for b in self.books.values())
+        anchor = self.cash_anchor or {
+            "broker": str(self.remote_initial_cash),
+            "ledger": str(sum((b.account.initial_cash for b in self.books.values()), Decimal(0))),
+            "fills": 0,
+        }
+        broker_cash = decimal(snapshot["cash"])
+        expected = decimal(anchor["broker"]) + ledger - decimal(anchor["ledger"])
+        if abs(broker_cash - expected) > cash_tolerance(fills - anchor["fills"]):
             raise RuntimeError("broker cash mismatch; trading stopped for reconciliation")
+        self.cash_anchor = {"broker": str(broker_cash), "ledger": str(ledger), "fills": fills}
         self.account_snapshot = snapshot
         return True
 
@@ -199,6 +210,7 @@ class PortfolioBroker:
                 "mode": self.client.mode,
                 "identity": self.identity,
                 "remote_initial_cash": str(self.remote_initial_cash),
+                "cash_anchor": getattr(self, "cash_anchor", None),
                 "extra": getattr(self, "extra", {}),
                 "books": {
                     s: {

@@ -24,6 +24,16 @@ NS = 1_000_000_000
 REJECTION_STATUSES = frozenset({400, 403, 422})
 
 
+# Alpaca books each fill's cash to the cent while the ledger keeps exact decimals, so
+# the two drift by up to half a cent per fill.
+CASH_TOLERANCE = Decimal(".01")
+ROUNDING_PER_FILL = Decimal(".005")
+
+
+def cash_tolerance(fills):
+    return CASH_TOLERANCE + ROUNDING_PER_FILL * fills
+
+
 class BrokerHTTPError(RuntimeError):
     """An HTTP error response; the status lets callers tell refusals from unknowns."""
 
@@ -480,7 +490,7 @@ class AlpacaBroker:
         snapshot = self.client.request("GET", "/v2/account")
         self._active_account(snapshot)
         expected = self.remote_initial_cash + self.account.cash - self.account.initial_cash
-        if abs(decimal(snapshot["cash"]) - expected) > Decimal(".01"):
+        if abs(decimal(snapshot["cash"]) - expected) > cash_tolerance(len(self.account.fills)):
             raise RuntimeError(
                 "broker cash/fee/deposit mismatch; entries halted for reconciliation"
             )

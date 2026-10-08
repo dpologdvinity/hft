@@ -3,12 +3,12 @@
 October 7, 2026. Two changes to `hft/data.py` made research sessions cheaper to load
 and hold without changing simulated behavior:
 
-1. **One bounded preflight per session** (`7753071`). `load_dataset` ran the
+1. **One bounded preflight per session** (`869e997`). `load_dataset` ran the
    memory-budget preflight twice per session, and its metadata sizing scan read
    64-row Arrow batches. Profiling a 5.1M-quote session showed that scan was about
    95% of load time. Each session is now preflighted once, scanning 8,192-row batches;
    the budget is still checked after every batch, before any market array is allocated.
-2. **Execution metadata view** (`5644c15`). Research loads now keep only the metadata
+2. **Execution metadata view** (`e318ca1`). Research loads now keep only the metadata
    the simulation reads: record identities (de-duplication and quote matching),
    arrival times (causal ordering) and trade conditions/tape (bar filtering). Raw
    JSON, raw lot sizes and exchange codes stay in the Parquet archive. Quote
@@ -25,7 +25,7 @@ exclude loaded metadata, and partition checksums cover the file bytes.
 Measured with [`benchmarks/session_pipeline.py`](../benchmarks/session_pipeline.py),
 which runs each repetition in a fresh process and fingerprints the bars, gaps,
 decision eligibility and (with `--rollout`) the full always-long rollout result.
-"Before" is commit `60dc6a4`; "after" is the execution view at `5644c15`. Raw
+"Before" is commit `d67bb47`; "after" is the execution view at `e318ca1`. Raw
 outputs are in [benchmarks/results/2026-10-07](../benchmarks/results/2026-10-07/).
 
 ### NVDA 2026-06-05: 5,103,471 quotes, 76,525 trades

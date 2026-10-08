@@ -5,7 +5,7 @@ project as a baseline. Integration is not implemented by this assessment.
 
 ## Recommendation
 
-Yes: reuse selected analysis components from `~/git/stock-analyzer` for stronger
+Yes: reuse selected analysis components from a separate local pattern-analysis project (`stock-analyzer`) for stronger
 development baselines and clearer diagnostic breakdowns. Start with one causal
 long-only pattern baseline evaluated through HFT's existing quote simulator.
 Pattern inputs for PPO are a later experiment, justified by development evidence

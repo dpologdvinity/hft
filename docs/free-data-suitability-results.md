@@ -43,4 +43,4 @@ A metadata-only freeze of the actual 82-session MCD archive took 0.161 seconds a
 
 Prioritize a measured execution view that projects proven-unused archive fields out of memory while retaining raw Parquet/checksums and all identifiers, conditions, exchange, tape and arrival consumers. Then establish bounded session/prepared-simulation ownership and measure throughput/RSS before acquiring a broad NVDA development archive. Extend the sample across predeclared development dates before deciding training readiness; do not select only passing dates, weaken the five-second rule, or use reserved final prices.
 
-Alpaca documentation retrieved through Context7 confirms IEX is single-exchange coverage; consolidated historical data is not equivalent to the free live IEX execution feed. See the [market-data FAQ](https://docs.alpaca.markets/us/docs/market-data-faq).
+Alpaca documentation confirms IEX is single-exchange coverage; consolidated historical data is not equivalent to the free live IEX execution feed. See the [market-data FAQ](https://docs.alpaca.markets/us/docs/market-data-faq).

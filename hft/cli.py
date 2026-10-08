@@ -11,9 +11,7 @@ from pathlib import Path
 
 
 def _parser():
-    parser = argparse.ArgumentParser(
-        description="Historical AI learning and risk-gated stock trading"
-    )
+    parser = argparse.ArgumentParser(description="Historical learning and risk-gated stock trading")
     commands = parser.add_subparsers(dest="command", required=True)
     smoke = commands.add_parser(
         "smoke", help="offline synthetic engineering proof; never live eligible"

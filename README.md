@@ -11,7 +11,7 @@ research infrastructure, not colocated submillisecond execution.
 
 **Python · PyTorch / Stable-Baselines3 · Gymnasium · ONNX Runtime · PyArrow / Parquet · React / Vite**
 
-> **Status:** the engineering platform is complete and tested. The current real-data
+> **Status:** the engineering platform is implemented and tested. The current real-data
 > experiment (82 MCD sessions) is blocked by measured feed gaps in the development
 > data, so no model has qualified for trading. The system reports that honestly
 > rather than training on unusable data.
@@ -28,14 +28,16 @@ trade history, not strategy returns; the $500 allocation is simulated.
   five-second bar publication, 17-feature observation, quote-level partial fills with
   modeled latency and costs, Decimal accounting and persistent risk limits. Fills need
   a genuine later quote; a bar close cannot invent liquidity.
-- **Leak-proof evaluation.** Chronological expanding folds, multiple seeds and
+- **Leakage-guarded evaluation.** Chronological expanding folds, multiple seeds and
   cost-matched controls (cash, intraday long, EMA crossover, 20 random policies,
   paired block bootstrap). Final-test dates are durably reserved before their prices
-  can be opened, and tests spy on every loader stage to prove it.
+  can be opened, and regression tests fail if the loader's preflight or read stages touch a
+  reserved partition.
 - **Measured performance work.** Profiling showed a memory-budget scan dominated
   session loading. Fixing it and loading an execution-only metadata view made a
   5.1M-quote session load **10× faster** with **63% less retained memory** and a
-  **33% lower peak RSS**, with identical simulation results.
+  **33% lower peak RSS** (single runs), with identical bars, gaps and decision
+  eligibility; full trading rollouts were identical on a smaller session.
   [Results and method](docs/performance-results.md).
 - **Honest data diagnostics.** Development-only inspection of 240,160 decisions across
   52 sessions found 57,049 feed gaps, blocking training before any fit.
@@ -84,7 +86,7 @@ runtime imports neither Torch nor Stable-Baselines3.
 
 ```bash
 python -m pytest -q                      # 218 tests, synthetic fixtures only
-ruff check hft tests benchmarks && ruff format --check hft tests benchmarks
+ruff check hft tests benchmarks scripts && ruff format --check hft tests benchmarks scripts
 npm --prefix frontend ci && npm --prefix frontend test && npm --prefix frontend run build
 ```
 
@@ -105,7 +107,7 @@ clone shows empty states until local data and experiments exist.
 ## Research workflow
 
 ```bash
-python -m hft download --symbol AAPL --start 2026-03-01 --end 2026-09-30 --output data/aapl
+python -m hft download --symbol AAPL --start 2026-03-01 --end 2026-06-30 --output data/aapl
 python -m hft experiment --dataset data/aapl/manifest.json --config config/research.toml --output artifacts/aapl/experiment.json
 python -m hft data-quality --experiment artifacts/aapl/experiment.json --all-development
 python -m hft train --experiment artifacts/aapl/experiment.json

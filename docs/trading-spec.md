@@ -5,7 +5,7 @@ research and graduation contracts implemented in `hft/`.
 
 ## 1. Goals
 
-- An AI stock trader that learns by repeatedly simulating historical markets.
+- A stock trader that learns by repeatedly simulating historical markets.
 - It should improve its trading decisions to maximize profit after costs.
 - Training need not run continuously or use real money.
 - It must support dry runs and eventually real stock trading.

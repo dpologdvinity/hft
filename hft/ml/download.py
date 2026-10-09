@@ -103,7 +103,7 @@ def _table(rows, timeframe, windows, reserved):
     }
     order = np.argsort(columns["t"], kind="stable")
     table = pa.table({k: v[order] for k, v in columns.items()}, schema=SCHEMA)
-    unique = np.concatenate([[True], np.diff(table.column("t").to_numpy()) > 0])
+    unique = np.concatenate([[True], np.diff(table.column("t").to_numpy()) > 0])[: len(table)]
     return table.filter(pa.array(unique))
 
 
@@ -119,18 +119,58 @@ def download_bars(symbol, timeframe, start, end, root, *, client=None, windows=N
     reserved = {d for s, d in reserved_final_sessions() if s == symbol}
     folder = Path(root) / timeframe / symbol
     folder.mkdir(parents=True, exist_ok=True)
+    if _adjustments_changed(client, symbol, timeframe, folder, windows, reserved):
+        for stale in folder.glob("*"):
+            stale.unlink()  # history was re-adjusted (split or dividend): fetch it all again
     paths = []
     for year in range(start.year, end.year + 1):
         path = folder / f"{year}.parquet"
         paths.append(path)
-        if path.exists() and year < end.year:
-            continue  # complete; the latest year is always refreshed
+        if year < end.year and _complete(path, year):
+            continue
         first, last = max(start, date(year, 1, 1)), min(end, date(year, 12, 31))
         rows = _fetch(client, symbol, timeframe, first, last)
         temporary = path.with_suffix(".parquet.tmp")
         pq.write_table(_table(rows, timeframe, windows, reserved), temporary)
         temporary.replace(path)
+        path.with_suffix(".json").write_text(json.dumps({"through": last.isoformat()}) + "\n")
     return paths
+
+
+def _complete(path, year):
+    """A year file counts as finished only once it was requested through December 31."""
+    marker = path.with_suffix(".json")
+    if path.exists() and marker.exists():
+        return json.loads(marker.read_text())["through"] >= f"{year}-12-31"
+    if path.exists():  # written before markers existed: trust it if it reaches year end
+        times = pq.read_table(path, columns=["t"]).column("t").to_numpy()
+        return len(times) > 0 and _session_day(int(times.max())) >= f"{year}-12-28"
+    return False
+
+
+def _adjustments_changed(client, symbol, timeframe, folder, windows, reserved):
+    """Refetch the last stored week and compare: adjusted history moves after a split
+    or dividend, and mixing old and new adjustments would fake a jump between files."""
+    files = sorted(folder.glob("*.parquet"))
+    if not files:
+        return False
+    stored = pq.read_table(files[-1])
+    if not len(stored):
+        return False
+    last = date.fromisoformat(_session_day(int(stored.column("t").to_numpy().max())))
+    fresh = _table(
+        _fetch(client, symbol, timeframe, last - timedelta(days=7), last),
+        timeframe,
+        windows,
+        reserved,
+    )
+    old = dict(zip(stored.column("t").to_pylist(), stored.column("c").to_pylist(), strict=True))
+    pairs = [
+        (old[t], c)
+        for t, c in zip(fresh.column("t").to_pylist(), fresh.column("c").to_pylist(), strict=True)
+        if t in old
+    ]
+    return any(abs(a / b - 1) > 1e-6 for a, b in pairs)
 
 
 def save_calendar(root, windows):

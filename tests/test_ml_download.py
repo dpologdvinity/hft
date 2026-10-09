@@ -42,14 +42,19 @@ class FakeClient:
 
     def get(self, url, params):
         year = int(params["start"][:4])
-        self.calls.append((url, year, params.get("page_token")))
+        self.calls.append((url, year, params.get("page_token"), params["start"]))
         if year in self.fail_years:
             self.fail_years.discard(year)
             raise RuntimeError("network down")
+        if params["start"][:4] != params["end"][:4]:  # a request across a year boundary
+            rows = [b for pages in self.pages.values() for page in pages for b in page]
+            rows = [b for b in rows if params["start"] <= b["t"] <= params["end"]]
+            return {"bars": rows, "next_page_token": None}
         pages = self.pages.get(year, [[]])
         index = int(params.get("page_token") or 0)
         token = str(index + 1) if index + 1 < len(pages) else None
-        return {"bars": pages[index], "next_page_token": token}
+        rows = [b for b in pages[index] if params["start"] <= b["t"] <= params["end"]]
+        return {"bars": rows, "next_page_token": token}
 
 
 MINUTES = {
@@ -95,7 +100,12 @@ def test_an_interrupted_download_resumes_without_refetching_finished_years(tmp_p
     assert not (tmp_path / "1Min" / "NVDA" / "2017.parquet").exists()
     client.calls.clear()
     _download(client, tmp_path)
-    assert {year for _, year, _ in client.calls} == {2017}  # 2016 was complete
+    refetched = {
+        year
+        for _, year, _, start in client.calls
+        if start.endswith("01-01T05:00:00Z") or start.startswith("2016-01-04")
+    }
+    assert refetched == {2017}  # 2016 was complete; only its last week was probed
     assert len(read_bars(tmp_path, "1Min", "NVDA")) == 5
 
 
@@ -114,3 +124,33 @@ def test_daily_bars_are_kept_whole(tmp_path):
         windows=WINDOWS,
     )
     assert len(read_bars(tmp_path, "1Day", "SPY")) == 2
+
+
+def test_a_year_downloaded_only_partway_is_completed_on_the_next_run(tmp_path):
+    client = FakeClient(MINUTES)
+    download_bars(
+        "NVDA",
+        "1Min",
+        date(2016, 1, 4),
+        date(2016, 11, 25),
+        tmp_path,
+        client=client,
+        windows=WINDOWS,
+    )
+    _download(FakeClient(MINUTES), tmp_path)  # now through 2017-01-03
+    assert len(read_bars(tmp_path, "1Min", "NVDA")) == 5
+
+
+def test_changed_adjustments_trigger_a_full_redownload(tmp_path):
+    _download(FakeClient(MINUTES), tmp_path)
+    halved = {
+        year: [
+            [{**bar, "o": 50.0, "h": 50.0, "l": 50.0, "c": 50.0, "vw": 50.0} for bar in page]
+            for page in pages
+        ]
+        for year, pages in MINUTES.items()
+    }
+    client = FakeClient(halved)  # a new split or dividend re-adjusted all history
+    _download(client, tmp_path)
+    assert any(start.startswith("2016-01") for _, _, _, start in client.calls)
+    assert set(read_bars(tmp_path, "1Min", "NVDA").column("c").to_pylist()) == {50.0}

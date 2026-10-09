@@ -376,3 +376,66 @@ def test_a_contradicting_broker_report_stops_the_run(tmp_path, monkeypatch):
     monkeypatch.setattr(OvernightBook, "poll", contradicted)
     with pytest.raises(BrokerIntegrityError):
         _run(tmp_path, clock, exchange, {"BIG": 1000}, DAY2.open_ns + 1800 * NS)
+
+
+class FakePicker:
+    def __init__(self):
+        self.symbols = ["BIG", "SMALL"]
+        self.refreshed, self.opens = [], []
+
+    def refresh(self, today, calendar):
+        self.refreshed.append(today)
+
+    def pick(self, today, opens, calendar):
+        self.opens.append(opens)
+        return ["SMALL", "NOT-IN-RUN"]
+
+
+def test_news_picks_buy_after_the_open_and_sell_before_the_close(tmp_path):
+    from hft.trading.news_picks import NewsPicksRunner
+
+    clock = Clock(START)
+    exchange = Exchange(clock, prices)
+    budgets = {"BIG": 1000, "SMALL": 100}
+    broker = PortfolioBroker(
+        exchange,
+        budgets,
+        Costs(0, 0),
+        lambda s: budget_gateway(budgets[s]),
+        run_dir=tmp_path / "state",
+        identity="run",
+        clock=clock,
+        book_class=OvernightBook,
+    )
+    config = OvernightConfig(
+        "test",
+        tuple(budgets),
+        budgets,
+        parse_strategy("news-picks:/frozen"),
+        log_dir=tmp_path / "logs",
+        run_dir=tmp_path / "state",
+    )
+    picker = FakePicker()
+    runner = NewsPicksRunner(
+        config,
+        broker,
+        [DAY1, DAY2],
+        picker=picker,
+        clock=clock,
+        sleep=clock.sleep,
+        prices=lambda symbols: {s: (prices(s, clock()), clock()) for s in symbols},
+    )
+    try:
+        summary = asyncio.run(runner.run(until_ns=DAY2.close_ns + 600 * NS))
+    finally:
+        broker.close()
+    assert [d.isoformat() for d in picker.refreshed] == ["2025-01-07"]  # day 1's window had passed
+    assert set(picker.opens[0]) >= {"BIG", "SMALL"}
+    sides = [(s, side, tif) for s, side, tif, _ in exchange.posts]
+    assert sides == [("SMALL", "buy", "day"), ("SMALL", "sell", "day")]
+    bought, sold = exchange.posts[0][3], exchange.posts[1][3]
+    assert DAY2.open_ns + 60 * NS <= bought < DAY2.open_ns + 600 * NS
+    assert DAY2.close_ns - 300 * NS <= sold < DAY2.close_ns
+    assert Decimal(summary["SMALL"]["position"]) == 0 and summary["SMALL"]["trades"] == 1
+    rows = _rows(tmp_path, "SMALL")
+    assert any(r["event"] == "picks" and r["picked"] for r in rows)

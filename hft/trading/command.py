@@ -57,7 +57,14 @@ def run_identity(
     budgets, strategy, *, daily_loss, max_drawdown, max_spread_bps, engine, engine_version, feed
 ):
     bundle = None
-    if strategy.bundle is not None:
+    if strategy.name == "news-picks":
+        folder = Path(strategy.bundle)
+        weights = sorted(p for p in folder.iterdir() if p.name.startswith("daily"))
+        digest = hashlib.sha256((folder / "config.json").read_bytes())
+        for path in weights:
+            digest.update(path.read_bytes())
+        bundle = digest.hexdigest()
+    elif strategy.bundle is not None:
         bundle = hashlib.sha256((Path(strategy.bundle) / "model.onnx").read_bytes()).hexdigest()
     value = {
         "budgets": {s: str(b) for s, b in budgets.items()},
@@ -87,7 +94,7 @@ def handle_trade(args):
     strategy = parse_strategy(args.strategy)
     if strategy.version != STRATEGY_VERSION:
         raise ValueError("unsupported strategy version")
-    if strategy.bundle is not None:
+    if strategy.bundle is not None and not strategy.is_scheduled:
         from ..policy import OnnxPolicy
 
         if len(budgets) != 1:
@@ -185,12 +192,26 @@ def _run_overnight(args, name, budgets, strategy, identity, client, calendar):
             daily_loss=args.daily_loss,
             max_drawdown=args.max_drawdown,
         )
-        runner = OvernightRunner(config, broker, calendar(), calendar_source=calendar)
-        print(
-            f"overnight paper trading {', '.join(budgets)} as run '{name}': buys near the "
-            "close, sells at the next open; Ctrl-C cancels open orders and keeps positions",
-            flush=True,
-        )
+        if strategy.name == "news-picks":
+            from ..ml.live import NewsPicker
+            from .news_picks import NewsPicksRunner
+
+            picker = NewsPicker(strategy.bundle, ROOT / "data" / "ml")
+            runner = NewsPicksRunner(
+                config, broker, calendar(), calendar_source=calendar, picker=picker
+            )
+            print(
+                f"news-picks paper trading as run '{name}': picks at the open from "
+                f"{strategy.bundle}, sells five minutes before the close; Ctrl-C cancels orders",
+                flush=True,
+            )
+        else:
+            runner = OvernightRunner(config, broker, calendar(), calendar_source=calendar)
+            print(
+                f"overnight paper trading {', '.join(budgets)} as run '{name}': buys near the "
+                "close, sells at the next open; Ctrl-C cancels open orders and keeps positions",
+                flush=True,
+            )
         return asyncio.run(_run_until_signal(runner))
     finally:
         broker.close()

@@ -256,7 +256,8 @@ class OvernightRunner:
         )
 
     def _quality(self, reason, symbols=None):
-        for symbol in symbols or self.config.symbols:
+        known = [s for s in symbols or () if s in self.logs] or list(self.logs)
+        for symbol in known:  # symbols outside the run (e.g. SPY for features) log run-wide
             self.logs[symbol].write("quality", event_ns=self.clock(), reason=reason)
 
     def _fetch(self, symbols):

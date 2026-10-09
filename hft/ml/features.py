@@ -79,7 +79,14 @@ def _rolling(values, window, func):
     return out
 
 
-def daily_frame(root, symbols, first_dates=None) -> DailyFrame:
+def daily_frame(root, symbols, first_dates=None, live=None) -> DailyFrame:
+    """Daily features, labels and validity on the common calendar.
+
+    `live=(day, {symbol: open})` appends a row for a session still in progress, built
+    from bars up to the previous session plus today's opening prices, exactly as the
+    backtest builds that day; its label is unknown (NaN) but the row is valid wherever
+    the backtest row would be tradable.
+    """
     universe = {s.ticker: s for s in UNIVERSE}
     if first_dates is None:
         first_dates = {t: s.first_date for t, s in universe.items()}
@@ -88,8 +95,16 @@ def daily_frame(root, symbols, first_dates=None) -> DailyFrame:
     days = set()
     for name in names:
         days |= {_day(t) for t in read_bars(root, "1Day", name).column("t").to_numpy()}
+    if live is not None:
+        days.add(np.datetime64(live[0], "D"))
     index = np.array(sorted(days), dtype="datetime64[D]")
     bars = {name: _aligned(root, name, index) for name in names}
+    if live is not None:
+        if index[-1] != np.datetime64(live[0], "D"):
+            raise ValueError("the live day must follow every stored bar")
+        for name in names:
+            bars[name][:, -1] = np.nan
+            bars[name][0, -1] = live[1].get(name, np.nan)
 
     market = []
     for name in ("SPY", "QQQ"):
@@ -111,7 +126,10 @@ def daily_frame(root, symbols, first_dates=None) -> DailyFrame:
         top, bottom = np.fmax(prev["o"], prev["c"]), np.fmin(prev["o"], prev["c"])
         first = np.datetime64(first_dates.get(name, index[0]), "D")
         usable = index >= first
-        seen = np.cumsum(usable & np.isfinite(c))  # sessions with data since the first date
+        has_bar = np.isfinite(c)
+        if live is not None:
+            has_bar[-1] = np.isfinite(o[-1])  # the live session counts once it has opened
+        seen = np.cumsum(usable & has_bar)  # sessions with data since the first date
         columns = [
             *(returns[k] for k in RETURN_SPANS),
             _lag(_rolling(daily_return, 20, np.std), 1),
@@ -133,6 +151,15 @@ def daily_frame(root, symbols, first_dates=None) -> DailyFrame:
             & (np.concatenate([[False], usable[:-1]]))
             & (name not in trade_only)
         )
+        if live is not None:  # tradable as the backtest would be, before the close is known
+            valid[-1, s] = (
+                usable[-1]
+                and np.isfinite(o[-1])
+                and np.isfinite(prev["c"][-1])
+                and len(usable) > 1
+                and usable[-2]
+                and name not in trade_only
+            )
     x[~valid] = np.nan
     return DailyFrame(index, np.array(symbols), x, label, valid)
 

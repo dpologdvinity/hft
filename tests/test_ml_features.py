@@ -83,3 +83,34 @@ def test_symbols_are_invalid_before_their_first_usable_date(tmp_path):
     first = frame.dates.tolist().index(np.datetime64(_sessions(120)[80]))
     assert not frame.valid[:first, pltr].any()
     assert frame.valid[first + 1 :, pltr].any()
+
+
+def test_a_live_row_for_today_matches_the_backtest_row(tmp_path):
+    full = _build(tmp_path / "full")
+    d = 100
+    day = full.dates[d].astype(object)
+    truncated = tmp_path / "live"
+
+    def drop_from(i, _, row):
+        return row
+
+    days = _sessions(120)
+    opens = {}
+    for k, symbol in enumerate(["SPY", "QQQ", "NVDA", "PLTR"]):
+        start = days if symbol != "PLTR" else days[80:]
+        _write(tmp_path / "tmp", symbol, start, k)
+        table = pq.read_table(tmp_path / "tmp" / "1Day" / symbol / "2019.parquet")
+        stamps = table.column("t").to_numpy()
+        cut = int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp()) * NS
+        opens[symbol] = float(table.column("o").to_numpy()[stamps >= cut][0])
+        folder = truncated / "1Day" / symbol
+        folder.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table.filter(pa.array(stamps < cut)), folder / "2019.parquet")
+    live = daily_frame(
+        truncated, ["SPY", "QQQ", "NVDA", "PLTR"], first_dates={"PLTR": days[80]}, live=(day, opens)
+    )
+    assert live.dates[-1] == full.dates[d]
+    for s in range(4):
+        if full.valid[d, s]:
+            assert live.valid[-1, s]
+            np.testing.assert_array_equal(live.x[-1, s], full.x[d, s])

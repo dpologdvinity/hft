@@ -3,6 +3,8 @@
 stable-baselines3==2.9.0
 torch==2.14.1+cpu
 onnx==1.23.1
+lightgbm==4.7.0
+scipy==1.18.1
 onnxscript==0.7.2
 pytest==9.1.1
 ruff==0.16.10

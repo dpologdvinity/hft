@@ -30,7 +30,15 @@ from .universe import UNIVERSE
 DEFAULT = {
     "seed": 0,
     "symbols": None,  # None: every trainable symbol in the universe
-    "daily": {"model": "lgbm", "k": 5, "threshold_bp": 0.0, "width": 64, "epochs": 20},
+    "daily": {
+        "model": "lgbm",
+        "target": "return",  # return: today's open-to-close move; range: log(high / low)
+        "k": 5,
+        "gate": False,  # True: only pick symbols whose predicted return beats the cost
+        "threshold_bp": 0.0,
+        "width": 64,
+        "epochs": 20,
+    },
     "minute": {
         "model": "none",  # none, cnn, gru or transformer
         "horizon": 15,
@@ -68,9 +76,23 @@ def _costs(symbols):
 # Daily ---------------------------------------------------------------------------
 
 
-def _fit_daily(config, frame, train_days, device):
+def _daily_target(inputs, target):
+    """Per symbol-day label for the daily model: the open-to-close return, or the day's
+    range, a measure of how much a stock moves (stocks "in play" for day trading)."""
+    if target == "return":
+        return inputs.frame.label
+    if target != "range":
+        raise ValueError("daily target must be return or range")
+    out = np.full(inputs.frame.label.shape, np.nan, dtype=np.float32)
+    for s, symbol in enumerate(inputs.symbols):
+        _, high, low, _, _ = _aligned(inputs.root, symbol, inputs.frame.dates)
+        out[:, s] = np.log(high / low)
+    return np.where(inputs.frame.valid, out, np.nan)
+
+
+def _fit_daily(config, frame, labels, train_days, device):
     x = frame.x[train_days]
-    y = frame.label[train_days]
+    y = labels[train_days]
     keep = frame.valid[train_days]
     rows = np.flatnonzero(keep.any(axis=1))
     stop_from = rows[int(len(rows) * 0.85)] if len(rows) else 0  # last 15% stops training
@@ -105,12 +127,16 @@ def _fit_daily(config, frame, train_days, device):
     return predict, network
 
 
-def _select(prediction, valid, costs_bp, k, threshold_bp, trainable):
-    """Per day, up to k symbols whose predicted move beats the round-trip cost."""
+def _select(prediction, valid, costs_bp, k, trainable, *, gate=False, threshold_bp=0.0):
+    """Per day, the k symbols with the highest prediction. With `gate`, only those whose
+    predicted return beats the round-trip cost plus `threshold_bp` are kept."""
+    score = np.where(valid & trainable, prediction, -np.inf)
     edge = prediction * BP - 2 * (costs_bp + SLIPPAGE_BPS) - threshold_bp
-    edge = np.where(valid & trainable, edge, -np.inf)
-    picks = np.argsort(-edge, axis=1)[:, :k]
-    return [[s for s in day if edge[d, s] > 0] for d, day in enumerate(picks)]
+    picks = np.argsort(-score, axis=1)[:, :k]
+    return [
+        [s for s in day if np.isfinite(score[d, s]) and (not gate or edge[d, s] > 0)]
+        for d, day in enumerate(picks)
+    ]
 
 
 # Minute --------------------------------------------------------------------------
@@ -232,16 +258,19 @@ def run_variant(config, data_root, out, *, split="validation", trials=1, inputs=
     score_days = split_mask(frame.dates, split)
     rows = np.flatnonzero(score_days)
 
+    settings_daily = config["daily"]
     daily_key = _key(
         "daily",
-        config["daily"]["model"],
-        config["daily"]["width"],
-        config["daily"]["epochs"],
+        settings_daily["model"],
+        settings_daily["target"],
+        settings_daily["width"],
+        settings_daily["epochs"],
         config["seed"],
         split,
     )
     if daily_key not in cache:
-        predict, daily_model = _fit_daily(config, frame, train_days, device)
+        labels = _daily_target(inputs, settings_daily["target"])
+        predict, daily_model = _fit_daily(config, frame, labels, train_days, device)
         predicted = predict(frame.x[rows].reshape(-1, frame.x.shape[-1])).reshape(len(rows), -1)
         cache[daily_key] = (predicted, daily_model)
     predicted, daily_model = cache[daily_key]
@@ -249,9 +278,10 @@ def run_variant(config, data_root, out, *, split="validation", trials=1, inputs=
         predicted,
         frame.valid[rows],
         costs_bp,
-        config["daily"]["k"],
-        config["daily"]["threshold_bp"],
+        settings_daily["k"],
         trainable,
+        gate=settings_daily["gate"] and settings_daily["target"] == "return",
+        threshold_bp=settings_daily["threshold_bp"],
     )
 
     settings = config["minute"]

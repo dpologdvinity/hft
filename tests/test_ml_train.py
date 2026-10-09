@@ -78,7 +78,7 @@ def market(tmp_path_factory):
 
 CONFIG = {
     "symbols": ["AAA", "BBB"],
-    "daily": {"k": 2, "threshold_bp": -1000},
+    "daily": {"k": 2, "gate": False},
     "minute": {"model": "cnn", "epochs": 1, "per_day": 2, "width": 8},
 }
 
@@ -150,12 +150,14 @@ def test_a_search_logs_every_variant_and_freezes_the_best(market, tmp_path):
     configs = [
         c
         for c in grid()
-        if c["daily"]["model"] == "lgbm" and c["minute"]["model"] in ("none", "cnn")
+        if c["daily"]["model"] == "lgbm"
+        and c["daily"]["target"] == "return"
+        and c["minute"]["model"] in ("none", "cnn")
     ]
     configs = [
         {
             **c,
-            "daily": {**c["daily"], "threshold_bp": -1000},
+            "daily": {**c["daily"], "gate": False},
             "minute": {**c["minute"], "epochs": 1, "per_day": 2, "width": 8},
         }
         for c in configs[:3]
@@ -166,4 +168,22 @@ def test_a_search_logs_every_variant_and_freezes_the_best(market, tmp_path):
     assert all(r["trials"] == 3 for r in rows)
     assert json.loads((tmp_path / "frozen.json").read_text()) == summary["frozen"]
     assert set(summary["frozen"]) <= {r["variant"] for r in rows}
-    assert len(grid()) == 56
+    assert len(grid()) == 84
+
+
+def test_selection_ranks_and_the_optional_gate_requires_beating_costs():
+    from hft.ml.train import _select
+
+    prediction = np.array([[0.0010, 0.0002, 0.0007]])  # 10, 2 and 7 bp
+    valid = np.ones((1, 3), bool)
+    costs = np.array([1.5, 1.5, 1.5])  # round trip 5 bp
+    trainable = np.array([True, True, True])
+    assert _select(prediction, valid, costs, 2, trainable) == [[0, 2]]
+    assert _select(prediction, valid, costs, 3, trainable, gate=True) == [[0, 2]]
+    assert _select(prediction, valid, costs, 3, trainable, gate=True, threshold_bp=4) == [[0]]
+
+
+def test_a_range_target_picks_movers_and_trades(market, tmp_path):
+    config = {**CONFIG, "daily": {"k": 2, "target": "range"}, "minute": {"model": "none"}}
+    metrics = run_variant(config, market, tmp_path)
+    assert metrics["trades"] > 100 and metrics["days_with_trades"] > 100

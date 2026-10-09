@@ -22,10 +22,18 @@ TOP = 5
 
 
 def grid(device="cpu", threads=1, seed=0):
-    """The spec's search: 8 daily settings x 7 minute settings (56 variants)."""
+    """12 daily settings x 7 minute settings (84 variants).
+
+    Daily: predict the return (top k, with or without a cost gate) or the day's range
+    (top k movers), each with trees or a network. Minute: none (hold the picks from
+    the open) or one of three networks at two horizons.
+    """
     daily = [
-        {"model": model, "k": k, "threshold_bp": threshold}
-        for model, k, threshold in itertools.product(("lgbm", "mlp"), (3, 5), (0.0, 10.0))
+        {"model": model, "target": "return", "k": k, "gate": gate}
+        for model, k, gate in itertools.product(("lgbm", "mlp"), (3, 5), (False, True))
+    ] + [
+        {"model": model, "target": "range", "k": k}
+        for model, k in itertools.product(("lgbm", "mlp"), (3, 5))
     ]
     minute = [{"model": "none"}] + [
         {"model": model, "horizon": horizon}

@@ -10,6 +10,7 @@ import pytest
 from hft.calendar import SessionWindow
 from hft.ml.download import SCHEMA, save_calendar
 from hft.ml.evaluate import deflated_sharpe, report
+from hft.ml.news import read_news
 from hft.ml.train import run_variant, variant_id
 
 NS = 1_000_000_000
@@ -335,3 +336,74 @@ def test_sentiment_features_join_the_daily_model_when_scored(market, tmp_path):
     }
     assert run_variant(config, root, tmp_path / "out")["strategy"]["days"] > 100
     assert len(sentiment_grid()) == 8
+
+
+def test_live_picks_match_the_backtest_picks_for_the_same_day(market, tmp_path):
+    import shutil
+
+    from hft.ml.download import load_calendar
+    from hft.ml.features import daily_frame
+    from hft.ml.live import NewsPicker
+    from hft.ml.news import SCHEMA as NEWS_SCHEMA
+    from hft.ml.news_features import news_features
+    from hft.ml.train import DailyModel, _costs, _select
+
+    root = tmp_path / "data"
+    shutil.copytree(market, root)
+    (root / "news").mkdir()
+    stamps = [int(datetime(2023, 2, 1 + i, 12, tzinfo=UTC).timestamp()) * NS for i in range(20)]
+    pq.write_table(
+        pa.table(
+            {
+                "id": list(range(20)),
+                "created_ns": stamps,
+                "updated_ns": stamps,
+                "headline": [
+                    "AAA upgraded to Buy" if i % 2 else "BBB downgraded" for i in range(20)
+                ],
+                "summary": [""] * 20,
+                "source": ["benzinga"] * 20,
+                "symbols": [["AAA"] if i % 2 else ["BBB"] for i in range(20)],
+            },
+            schema=NEWS_SCHEMA,
+        ),
+        root / "news" / "2023-02.parquet",
+    )
+    config = {
+        **CONFIG,
+        "daily": {"k": 1, "news": True, "model": "mlp", "epochs": 2},
+        "minute": {"model": "none"},
+    }
+    metrics = run_variant(config, root, tmp_path / "out")
+    variant = tmp_path / "out" / metrics["variant"]
+    calendar = load_calendar(root)
+    frame = daily_frame(root, ["AAA", "BBB"])
+    x = np.concatenate(
+        [frame.x, news_features(read_news(root), ["AAA", "BBB"], frame.dates, calendar)], -1
+    )
+    model = DailyModel.load(
+        variant, run_variant.__globals__["_merge"](run_variant.__globals__["DEFAULT"], config)
+    )
+    d = int(np.flatnonzero(frame.dates >= np.datetime64("2023-02-09"))[0])
+    day = frame.dates[d].astype(object)
+    expected = _select(
+        model.predict(x[d]).reshape(1, -1),
+        frame.valid[d : d + 1],
+        _costs(["AAA", "BBB"]),
+        1,
+        np.ones(2, bool),
+    )[0]
+    live_root = tmp_path / "live"
+    shutil.copytree(root, live_root)
+    opens = {}
+    from hft.ml.features import _day
+
+    for symbol in ("SPY", "QQQ", "AAA", "BBB"):
+        path = live_root / "1Day" / symbol / "2023.parquet"
+        table = pq.read_table(path)
+        days = np.array([_day(t) for t in table.column("t").to_numpy()])
+        opens[symbol] = float(table.column("o").to_numpy()[days == frame.dates[d]][0])
+        pq.write_table(table.filter(pa.array(days < frame.dates[d])), path)
+    picker = NewsPicker(variant, live_root)
+    picks = picker.pick(day, opens, calendar)
+    assert picks == [["AAA", "BBB"][s] for s in expected]

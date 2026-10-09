@@ -40,8 +40,8 @@ What the 84 variants show:
 
 ## Decision
 
-No variant is frozen for the final test. All five candidates are below holding,
-four of them with intervals entirely below zero, so spending the one-time test on
+No variant is frozen for the final test. All five candidates trail holding on
+average (two with intervals entirely below zero), so spending the one-time test on
 them would prove nothing. The test years stay unseen for a better idea.
 
 This repeats the lesson of every earlier experiment ([project history](project-history.md)):

@@ -213,26 +213,69 @@ class PortfolioBroker:
         return True
 
     def _book_income(self, difference, tolerance):
-        """Dividends paid on the run's stocks explain a cash difference: credit each to
-        its stock's ledger and return the total. None when they do not explain it."""
-        query = urlencode({"direction": "desc", "page_size": 100})
-        rows = self.client.request("GET", f"/v2/account/activities?{query}") or []
+        """Broker cash activities that explain a cash difference, booked once each.
+
+        Dividends on the run's stocks are credited to that stock's ledger. Regulatory
+        fees (SEC, FINRA TAF, CAT) arrive hours after the trades they charge, for the
+        whole account: a fee dated a day on which the run's stocks sold is split over
+        those stocks by sale proceeds; a fee for days the run did not sell (another run
+        on the same account) is recorded as external. Returns the total booked to the
+        run's ledgers, or None when the activities do not explain the difference.
+        """
+        rows = []
+        for kind in ("DIV", "FEE"):
+            query = urlencode({"direction": "desc", "page_size": 100})
+            rows += self.client.request("GET", f"/v2/account/activities/{kind}?{query}") or []
         new = [
             r
             for r in rows
-            if str(r.get("activity_type", "")).startswith("DIV")
-            and r.get("id") not in self.income_ids
-            and r.get("symbol") in self.books
+            if r.get("id") not in self.income_ids
+            and (
+                str(r.get("activity_type", "")).startswith("DIV")
+                and r.get("symbol") in self.books
+                or r.get("activity_type") == "FEE"
+            )
         ]
         total = sum((decimal(r["net_amount"]) for r in new), Decimal(0))
         if not new or abs(difference - total) > tolerance:
             return None
+        booked = Decimal(0)
+        external = self.extra.setdefault("external_fees", [])
         for r in new:
-            self.books[r["symbol"]].account.record_income(
-                r["net_amount"], self.clock(), f"{r['activity_type']}:{r['id']}"
-            )
+            amount, source = decimal(r["net_amount"]), f"{r['activity_type']}:{r['id']}"
+            if r["activity_type"] != "FEE":
+                self.books[r["symbol"]].account.record_income(amount, self.clock(), source)
+                booked += amount
+            else:
+                shares = self._sale_proceeds(str(r.get("date", "")))
+                if shares:
+                    whole = sum(shares.values(), Decimal(0))
+                    for symbol, proceeds in shares.items():
+                        part = amount * proceeds / whole
+                        self.books[symbol].account.record_income(part, self.clock(), source)
+                        booked += part
+                else:
+                    external.append({"id": r["id"], "date": r.get("date"), "amount": str(amount)})
             self.income_ids.add(r["id"])
-        return total
+        return booked
+
+    def _sale_proceeds(self, day):
+        """Sale proceeds per stock of this run on `day` (New York date)."""
+        from datetime import UTC, datetime
+        from zoneinfo import ZoneInfo
+
+        proceeds = {}
+        for symbol, book in self.books.items():
+            for fill in book.account.fills:
+                stamp = datetime.fromtimestamp(fill.timestamp_ns / 1e9, UTC)
+                if (
+                    fill.signed_quantity < 0
+                    and stamp.astimezone(ZoneInfo("America/New_York")).date().isoformat() == day
+                ):
+                    proceeds[symbol] = (
+                        proceeds.get(symbol, Decimal(0)) - fill.signed_quantity * fill.price
+                    )
+        return proceeds
 
     def save(self):
         self.store.save(

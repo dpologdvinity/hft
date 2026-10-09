@@ -1,4 +1,6 @@
+from datetime import UTC, datetime
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -37,8 +39,11 @@ class Exchange:
                 self.cash -= sign * qty * Decimal(price)
 
     def request(self, method, path, body=None):
-        if path.startswith("/v2/account/activities"):
-            return list(getattr(self, "activities", []))
+        if path.startswith("/v2/account/activities/"):
+            kind = path.split("/")[4].split("?")[0]
+            return [
+                a for a in getattr(self, "activities", []) if a["activity_type"].startswith(kind)
+            ]
         if path == "/v2/account":
             return {"id": "paper-1", "status": "ACTIVE", "cash": str(self.cash)}
         if path == "/v2/clock":
@@ -290,5 +295,52 @@ def test_integrity_errors_are_not_hidden_by_per_book_polling(tmp_path, monkeypat
         monkeypatch.setattr(broker.book("NVDA"), "poll", contradicted)
         with pytest.raises(BrokerIntegrityError):
             broker.poll()
+    finally:
+        broker.close()
+
+
+def test_regulatory_fees_for_another_runs_trades_are_recorded_as_external(tmp_path):
+    """The overnight run stopped at 03:46 when $0.40 of SEC and CAT fees for an
+    earlier intraday run's sales were posted to the shared paper account."""
+    exchange = Exchange()
+    broker = portfolio(tmp_path, exchange)
+    try:
+        assert broker.reconcile()
+        exchange.cash -= Decimal("0.40")
+        exchange.activities = [
+            {"id": "f1", "activity_type": "FEE", "date": "2026-10-08", "net_amount": "-0.39"},
+            {"id": "f2", "activity_type": "FEE", "date": "2026-10-08", "net_amount": "-0.01"},
+        ]
+        assert broker.reconcile()
+        assert [f["id"] for f in broker.extra["external_fees"]] == ["f1", "f2"]
+        assert broker.book("NVDA").account.cash == Decimal(300)  # not charged to this run
+        assert broker.reconcile()  # booked once
+    finally:
+        broker.close()
+
+
+def test_fees_on_days_the_run_sold_are_split_by_sale_proceeds(tmp_path):
+    exchange = Exchange()
+    broker = portfolio(tmp_path, exchange)
+    try:
+        for symbol, price in (("NVDA", "100"), ("AAPL", "100")):
+            assert buy(broker, symbol).allowed
+            exchange.fill(symbol, price)
+        broker.poll()
+        for symbol in ("NVDA", "AAPL"):
+            assert buy(broker, symbol, action=0).allowed
+            exchange.fill(symbol, "100")
+        broker.poll()
+        assert broker.reconcile()
+        day = datetime.fromtimestamp(NOW / 1e9, UTC).astimezone(ZoneInfo("America/New_York")).date()
+        before = {s: broker.book(s).account.cash for s in ("NVDA", "AAPL")}
+        exchange.cash -= Decimal("0.10")
+        exchange.activities = [
+            {"id": "f3", "activity_type": "FEE", "date": day.isoformat(), "net_amount": "-0.10"}
+        ]
+        assert broker.reconcile()
+        charged = {s: before[s] - broker.book(s).account.cash for s in before}
+        assert sum(charged.values()) == Decimal("0.10")
+        assert charged["NVDA"] > charged["AAPL"] > 0  # NVDA sold more (300 vs 200 budget)
     finally:
         broker.close()

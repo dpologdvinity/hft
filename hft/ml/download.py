@@ -25,7 +25,6 @@ import pyarrow.parquet as pq
 
 from ..feed import parse_timestamp
 from ..history import DATA_BASE, HistoryError, ReadOnlyClient, _calendar
-from ..training import reserved_final_sessions
 from .universe import UNIVERSE
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -115,6 +114,8 @@ def download_bars(symbol, timeframe, start, end, root, *, client=None, windows=N
     client = client or ReadOnlyClient()
     if windows is None:
         windows, _ = _calendar(client, start.isoformat(), end.isoformat())
+    from ..training import reserved_final_sessions  # heavy; only downloads need it
+
     reserved = {d for s, d in reserved_final_sessions() if s == symbol}
     folder = Path(root) / timeframe / symbol
     folder.mkdir(parents=True, exist_ok=True)

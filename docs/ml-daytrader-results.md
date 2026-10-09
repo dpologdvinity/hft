@@ -47,3 +47,25 @@ them would prove nothing. The test years stay unseen for a better idea.
 This repeats the lesson of every earlier experiment ([project history](project-history.md)):
 on these liquid stocks, the move a model can predict from prices alone at minute and
 daily horizons is smaller than the cost of trading it.
+
+## News features: 16 more variants (2026-10-09)
+
+The daily models also received nine pre-open news features from 335,339 headlines
+([design](specs/2026-10-09-news-features-design.md)); same years, costs and benchmark,
+counted as trials 85 to 100 (Kaggle T4, code 3ff3dc5).
+
+| Daily model | Picks | Minute model | Total | Per trade | 3x costs | Sharpe | Edge vs holding (bp/day, 95% interval) |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | --- |
+| Network, gated, with news | 3 | hold from open | +47.8% | +9.9 bp | -19.1% | 0.97 | -5.3 (-17.0 to +6.2) |
+| Network, with news | 3 | hold from open | +45.8% | +8.6 bp | -25.1% | | -5.5 (-17.0 to +6.0) |
+| Network, with news | 5 | hold from open | +19.3% | +4.2 bp | -37.9% | | -9.9 (-19.0 to -0.9) |
+
+Holding the same symbols: +97.2%, Sharpe 2.04. The best news variant's deflated
+Sharpe ratio after 100 trials is 0.12.
+
+News roughly tripled the best daily-pick result (+47.8% against +13.6% without
+news, +9.9 against +4.1 bp per trade), the first sign in this project that a
+model learned something from data beyond prices. It still trails holding by about
+5 bp a day with an interval that includes zero, loses at three times the costs, and
+after 100 trials its Sharpe ratio is not distinguishable from luck. The 30-minute
+GRU again traded rarely and lost. No variant is frozen; the test years stay unseen.

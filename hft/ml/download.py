@@ -14,7 +14,7 @@ never stored.
 import argparse
 import sys
 import time as time_module
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -23,7 +23,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from ..feed import parse_timestamp
-from ..history import DATA_BASE, ReadOnlyClient, _calendar
+from ..history import DATA_BASE, HistoryError, ReadOnlyClient, _calendar
 from ..training import reserved_final_sessions
 from .universe import UNIVERSE
 
@@ -47,6 +47,13 @@ def _utc(day, at=time(0)):
     return datetime.combine(day, at, NEW_YORK).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _end(day):
+    # Free SIP data excludes the latest 15 minutes; asking for them is refused (403).
+    latest = datetime.now(UTC) - timedelta(minutes=16)
+    wanted = datetime.combine(day, time(23, 59), NEW_YORK).astimezone(UTC)
+    return min(wanted, latest).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _session_day(ns):
     return datetime.fromtimestamp(ns / 1e9, UTC).astimezone(NEW_YORK).date().isoformat()
 
@@ -55,7 +62,7 @@ def _fetch(client, symbol, timeframe, start, end):
     params = {
         "timeframe": timeframe,
         "start": _utc(start),
-        "end": _utc(end, time(23, 59)),
+        "end": _end(end),
         "adjustment": "all",
         "feed": "sip",
         "sort": "asc",
@@ -149,15 +156,24 @@ def main(argv=None):
         if wanted and symbol.ticker not in wanted:
             continue
         started = time_module.monotonic()
-        paths = download_bars(
-            symbol.ticker,
-            args.timeframe,
-            symbol.first_date,
-            args.end,
-            args.root,
-            client=client,
-            windows=windows,
-        )
+        for attempt in range(6):
+            try:
+                paths = download_bars(
+                    symbol.ticker,
+                    args.timeframe,
+                    symbol.first_date,
+                    args.end,
+                    args.root,
+                    client=client,
+                    windows=windows,
+                )
+                break
+            except HistoryError as error:
+                # Rate limits are shared with other programs on the same key: wait and resume.
+                if "429" not in str(error) or attempt == 5:
+                    raise
+                print(f"{symbol.ticker:<6} rate limited; retrying in 60 s", flush=True)
+                time_module.sleep(60)
         rows = sum(pq.read_metadata(p).num_rows for p in paths)
         seconds = time_module.monotonic() - started
         print(f"{symbol.ticker:<6} {args.timeframe} {rows:>9} bars {seconds:6.1f}s", flush=True)

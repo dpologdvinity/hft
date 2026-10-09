@@ -135,3 +135,109 @@ def daily_frame(root, symbols, first_dates=None) -> DailyFrame:
         )
     x[~valid] = np.nan
     return DailyFrame(index, np.array(symbols), x, label, valid)
+
+
+# Minute data -----------------------------------------------------------------
+
+MINUTES = 390
+LAST_MINUTE_BEFORE_CLOSE = 5  # positions are flat five minutes before the close
+CHANNELS = ("return", "relative_volume", "vwap_distance", "time_of_day")
+
+
+@dataclass
+class MinuteData:
+    dates: np.ndarray  # (n,) datetime64[D], sessions with at least one bar
+    open: np.ndarray  # (n, 390) float32, NaN where there is no bar
+    valid: np.ndarray  # (n, 390) bool
+    last_minute: np.ndarray  # (n,) int: the minute by which positions are flat
+    channels: np.ndarray  # (n, 390, len(CHANNELS)) float32, causal per minute
+
+
+def _minute_channels(close, volume, vwap, valid):
+    """Per session row: return, relative volume, distance from VWAP, time of day."""
+    n = len(close)
+    filled = np.where(valid, close, np.nan)
+    # Carry the last real close forward so a return spans any missing minutes.
+    index = np.where(valid, np.arange(MINUTES), 0)
+    np.maximum.accumulate(index, axis=1, out=index)
+    carried = np.take_along_axis(np.nan_to_num(filled), index, axis=1)
+    previous = np.concatenate([np.full((n, 1), np.nan), carried[:, :-1]], axis=1)
+    first = valid & (np.cumsum(valid, axis=1) == 1)
+    previous = np.where(first | (previous == 0), np.nan, previous)
+    returns = np.where(valid & np.isfinite(previous), np.log(carried / previous), 0.0)
+    volume = np.where(valid, volume, 0.0)
+    seen = np.maximum(np.cumsum(valid, axis=1), 1)
+    relative = np.where(
+        valid, np.log1p(volume / np.maximum(np.cumsum(volume, axis=1) / seen, 1e-9)), 0.0
+    )
+    session_vwap = np.cumsum(np.where(valid, vwap, 0) * volume, axis=1) / np.maximum(
+        np.cumsum(volume, axis=1), 1e-9
+    )
+    distance = np.where(
+        valid & (session_vwap > 0),
+        np.log(carried / np.where(session_vwap > 0, session_vwap, 1)),
+        0.0,
+    )
+    time_of_day = np.broadcast_to(np.arange(MINUTES) / MINUTES, (n, MINUTES))
+    return np.stack([returns, relative, distance, time_of_day], axis=-1).astype(np.float32)
+
+
+def minute_store(root, symbols, sessions) -> dict[str, MinuteData]:
+    """Minute arrays per symbol on the exchange calendar `sessions` (SessionWindow list)."""
+    opens = np.array([w.open_ns for w in sessions], dtype=np.int64)
+    closes = np.array([w.close_ns for w in sessions], dtype=np.int64)
+    store = {}
+    for symbol in symbols:
+        table = read_bars(root, "1Min", symbol)
+        t = table.column("t").to_numpy()
+        session = np.searchsorted(opens, t, side="right") - 1
+        keep = (session >= 0) & (t < closes[np.clip(session, 0, None)])
+        session, t = session[keep], t[keep]
+        minute = ((t - opens[session]) // (60 * 1_000_000_000)).astype(np.int64)
+        rows, row_of = np.unique(session, return_inverse=True)
+        shape = (len(rows), MINUTES)
+        values = {}
+        for name in ("o", "c", "v", "vw"):
+            array = np.full(shape, np.nan)
+            array[row_of, minute] = table.column(name).to_numpy()[keep]
+            values[name] = array
+        valid = np.isfinite(values["c"])
+        length = ((closes[rows] - opens[rows]) // (60 * 1_000_000_000)).astype(np.int64)
+        store[symbol] = MinuteData(
+            dates=np.array([sessions[r].session_id for r in rows], dtype="datetime64[D]"),
+            open=values["o"].astype(np.float32),
+            valid=valid,
+            last_minute=length - LAST_MINUTE_BEFORE_CLOSE,
+            channels=_minute_channels(values["c"], values["v"], values["vw"], valid),
+        )
+    return store
+
+
+def windows(store, symbols, keys, *, lookback=60, horizon=15):
+    """x (N, lookback, C) up to and including each key's minute; y = log return from the
+    next minute's open to the open `horizon` minutes later (NaN when either is missing).
+
+    `keys` rows are (symbol index into `symbols`, session row, minute).
+    """
+    keys = np.asarray(keys, dtype=np.int64)
+    x = np.zeros((len(keys), lookback, len(CHANNELS)), dtype=np.float32)
+    y = np.full(len(keys), np.nan, dtype=np.float32)
+    offsets = np.arange(-lookback + 1, 1)
+    for s, symbol in enumerate(symbols):
+        rows = np.flatnonzero(keys[:, 0] == s)
+        if not len(rows):
+            continue
+        data = store[symbol]
+        session, minute = keys[rows, 1], keys[rows, 2]
+        idx = minute[:, None] + offsets
+        inside = idx >= 0
+        gathered = data.channels[session[:, None], np.clip(idx, 0, None)]
+        x[rows] = np.where(inside[..., None], gathered, 0)
+        start, end = minute + 1, minute + 1 + horizon
+        ok = end < MINUTES
+        a = data.open[session[ok], start[ok]]
+        b = data.open[session[ok], end[ok]]
+        label = np.full(len(rows), np.nan, dtype=np.float32)
+        label[ok] = np.log(b / a)
+        y[rows] = label
+    return x, y

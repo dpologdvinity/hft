@@ -12,6 +12,7 @@ never stored.
 """
 
 import argparse
+import json
 import sys
 import time as time_module
 from datetime import UTC, date, datetime, time, timedelta
@@ -131,6 +132,23 @@ def download_bars(symbol, timeframe, start, end, root, *, client=None, windows=N
     return paths
 
 
+def save_calendar(root, windows):
+    rows = [
+        {"session_id": w.session_id, "open_ns": w.open_ns, "close_ns": w.close_ns} for w in windows
+    ]
+    path = Path(root) / "calendar.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(rows) + "\n")
+
+
+def load_calendar(root):
+    """Exchange sessions saved by the download, as SessionWindow objects."""
+    from ..calendar import SessionWindow
+
+    rows = json.loads((Path(root) / "calendar.json").read_text())
+    return [SessionWindow(r["session_id"], r["open_ns"], r["close_ns"]) for r in rows]
+
+
 def read_bars(root, timeframe, symbol) -> pa.Table:
     files = sorted((Path(root) / timeframe / symbol).glob("*.parquet"))
     if not files:
@@ -151,6 +169,7 @@ def main(argv=None):
     _read_credentials()
     client = ReadOnlyClient()
     windows, _ = _calendar(client, "2016-01-01", args.end.isoformat())
+    save_calendar(args.root, [w for w in windows if w.session_id <= args.end.isoformat()])
     wanted = set(args.symbols or [])
     for symbol in UNIVERSE:
         if wanted and symbol.ticker not in wanted:

@@ -3,14 +3,14 @@ from datetime import UTC, date, datetime, timedelta
 
 import numpy as np
 import pyarrow as pa
-import pyarrow.compute  # noqa: F401  (pa.compute)
+import pyarrow.compute
 import pyarrow.parquet as pq
 import pytest
 
 from hft.calendar import SessionWindow
 from hft.ml.download import SCHEMA, save_calendar
 from hft.ml.evaluate import deflated_sharpe, report
-from hft.ml.train import main, run_variant, variant_id
+from hft.ml.train import run_variant, variant_id
 
 NS = 1_000_000_000
 
@@ -111,28 +111,13 @@ def test_holding_is_an_equal_weight_buy_at_the_first_open(market, tmp_path):
     assert total == pytest.approx(np.mean(values) - 1)
 
 
-def test_the_test_split_needs_a_frozen_variant_list(market, tmp_path):
-    config = tmp_path / "cfg.json"
-    config.write_text(json.dumps(CONFIG))
-    with pytest.raises(SystemExit):
-        main(["--config", str(config), "--data", str(market), "--out", str(tmp_path), "--final"])
-    frozen = tmp_path / "frozen.json"
-    frozen.write_text(json.dumps(["not-this-one"]))
-    with pytest.raises(SystemExit):
-        main(
-            [
-                "--config",
-                str(config),
-                "--data",
-                str(market),
-                "--out",
-                str(tmp_path),
-                "--final",
-                "--frozen",
-                str(frozen),
-            ]
-        )
-    assert len(variant_id(CONFIG)) == 12
+def test_variant_ids_ignore_where_a_variant_runs():
+    assert variant_id({**CONFIG, "device": "cuda", "threads": 4}) == variant_id(CONFIG)
+
+
+def test_the_test_split_cannot_be_scored_directly(market, tmp_path):
+    with pytest.raises(PermissionError):
+        run_variant(CONFIG, market, tmp_path, split="test")
 
 
 def test_report_and_deflated_sharpe():
@@ -214,3 +199,33 @@ def test_results_are_also_reported_at_three_times_the_costs(market, tmp_path):
     triple = metrics["at_3x_cost"]
     assert triple["strategy"]["total"] < metrics["strategy"]["total"]
     assert triple["holding"] == metrics["holding"]
+
+
+def test_the_final_test_runs_once_on_the_saved_frozen_models(market, tmp_path, monkeypatch):
+    from hft.ml import datasets, train
+    from hft.ml.search import run_final, run_search
+
+    monkeypatch.setitem(datasets.SPLITS, "validation", (date(2023, 1, 1), date(2023, 3, 31)))
+    monkeypatch.setitem(datasets.SPLITS, "test", (date(2023, 4, 1), date(2099, 12, 31)))
+    configs = [{**CONFIG, "minute": {"model": "none"}}, CONFIG]
+    run_search(configs, market, tmp_path / "search", symbols=["AAA", "BBB"], log=lambda _: None)
+
+    def no_training(*args, **kwargs):
+        raise AssertionError("frozen models must not be retrained")
+
+    monkeypatch.setattr(train, "_fit_daily", no_training)
+    monkeypatch.setattr(train, "_fit_minute", no_training)
+    registry = tmp_path / "registry.json"
+    final = run_final(
+        tmp_path / "search", market, tmp_path / "final", registry=registry, log=lambda _: None
+    )
+    assert len(final["results"]) == 2 and final["confidence"] == 97.5
+    assert all(r["split"] == "test" and r["first_day"] >= "2023-04" for r in final["results"])
+    assert json.loads(registry.read_text())["frozen"] == final["frozen"]
+    with pytest.raises(RuntimeError, match="already run"):
+        run_final(tmp_path / "search", market, tmp_path / "final", registry=registry)
+    frozen = final["frozen"][0]
+    weights = next((tmp_path / "search" / frozen).glob("daily*"))
+    weights.write_bytes(weights.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="changed"):
+        run_final(tmp_path / "search", market, tmp_path / "final2", registry=tmp_path / "r2.json")

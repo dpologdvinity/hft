@@ -16,6 +16,9 @@ import sys
 import zipfile
 from pathlib import Path
 
+from .datasets import write_data_manifest
+from .train import code_commit
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -31,6 +34,7 @@ def package_data(data, target) -> Path:
     data = Path(data)
     if not (data / "calendar.json").exists():
         raise ValueError(f"{data} has no calendar.json; run hft.ml.download first")
+    write_data_manifest(data)  # training refuses any copy whose files differ from this
     with zipfile.ZipFile(target, "w", zipfile.ZIP_STORED) as archive:  # Parquet is compressed
         for path in sorted(data.rglob("*")):
             if path.is_file() and path.suffix in (".parquet", ".json"):
@@ -44,6 +48,8 @@ def package_code(target) -> Path:
         cwd=ROOT,
         check=True,
     )
+    with zipfile.ZipFile(target, "a") as archive:  # no .git on Kaggle: record the version
+        archive.writestr("hft-ml-code/COMMIT", code_commit() + "\n")
     return target
 
 

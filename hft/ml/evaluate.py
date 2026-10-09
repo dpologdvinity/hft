@@ -50,7 +50,9 @@ def deflated_sharpe(sharpe, trials, days):
     return float(norm.cdf((daily - expected_max) / scale))
 
 
-def report(returns, holding, trades, *, trials=1, resamples=10_000, seed=0) -> dict:
+def report(
+    returns, holding, trades, *, trials=1, resamples=10_000, seed=0, confidence=95.0
+) -> dict:
     """`returns` and `holding`: daily net returns on the same days; `trades`: per-trade
     net returns."""
     returns, holding = np.asarray(returns, float), np.asarray(holding, float)
@@ -60,7 +62,8 @@ def report(returns, holding, trades, *, trials=1, resamples=10_000, seed=0) -> d
     low = high = 0.0
     if len(difference) > 1:
         means = rng.choice(difference, size=(resamples, len(difference))).mean(axis=1)
-        low, high = (float(v) for v in np.percentile(means, [2.5, 97.5]))
+        tail = (100 - confidence) / 2
+        low, high = (float(v) for v in np.percentile(means, [tail, 100 - tail]))
     strategy = _summary(returns)
     return {
         "strategy": strategy,
@@ -73,4 +76,5 @@ def report(returns, holding, trades, *, trials=1, resamples=10_000, seed=0) -> d
         "beats_holding": bool(low > 0),
         "deflated_sharpe": deflated_sharpe(strategy.get("sharpe", 0.0), trials, len(returns)),
         "trials": trials,
+        "confidence": confidence,
     }

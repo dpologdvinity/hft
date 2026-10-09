@@ -237,6 +237,10 @@ def main(argv=None):
         rows = sum(pq.read_metadata(p).num_rows for p in paths)
         seconds = time_module.monotonic() - started
         print(f"{symbol.ticker:<6} {args.timeframe} {rows:>9} bars {seconds:6.1f}s", flush=True)
+    if (args.root / "manifest.json").exists():
+        from .datasets import write_data_manifest
+
+        write_data_manifest(args.root)  # the data changed on purpose: record the new version
     return 0
 
 

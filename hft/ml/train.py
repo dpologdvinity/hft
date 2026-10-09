@@ -12,17 +12,19 @@ so it is run once, after the choice is made.
 import argparse
 import hashlib
 import json
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import lightgbm as lgb
 import numpy as np
 import torch
 
-from .datasets import split_mask
+from .datasets import data_fingerprint, split_mask
 from .download import load_calendar
 from .evaluate import report
-from .features import DAILY_FEATURES, _aligned, daily_frame, minute_store, windows
+from .features import CHANNELS, DAILY_FEATURES, _aligned, daily_frame, minute_store, windows
 from .fills import SLIPPAGE_BPS, half_spread_bps, simulate_day
 from .models import MINUTE_MODELS, DailyMLP, fit_torch, train_lightgbm
 from .universe import UNIVERSE
@@ -64,7 +66,9 @@ def _merge(base, override):
 
 
 def variant_id(config) -> str:
-    text = json.dumps(config, sort_keys=True)
+    """Hash of what a variant is; where it runs (device, threads) is not part of it."""
+    what = {k: v for k, v in config.items() if k not in ("device", "threads")}
+    text = json.dumps(what, sort_keys=True)
     return hashlib.sha256(text.encode()).hexdigest()[:12]
 
 
@@ -101,30 +105,60 @@ def _fit_daily(config, frame, labels, train_days, device):
     stop[:stop_from] = False
     settings = config["daily"]
     if settings["model"] == "lgbm":
-        model = train_lightgbm(
+        booster = train_lightgbm(
             x[fit], y[fit], x[stop], y[stop], seed=config["seed"], threads=config["threads"]
         )
-        return lambda features: model.predict(features), model
-    mean = np.nanmean(x[fit], axis=0)
-    std = np.nanstd(x[fit], axis=0) + 1e-9
-
-    def prepare(features):
-        return torch.as_tensor(np.nan_to_num((features - mean) / std).astype(np.float32))
-
+        return DailyModel(config, booster=booster)
+    model = DailyModel(
+        config, mean=np.nanmean(x[fit], axis=0), std=np.nanstd(x[fit], axis=0) + 1e-9
+    )
     torch.manual_seed(config["seed"])
-    network = fit_torch(
+    model.network = fit_torch(
         DailyMLP(len(DAILY_FEATURES), settings["width"]),
-        prepare(x[fit]),
+        model.prepare(x[fit]),
         torch.as_tensor(y[fit] * BP),
         epochs=settings["epochs"],
         device=device,
     )
+    return model
 
-    def predict(features):
+
+class DailyModel:
+    """A trained daily model that predicts, saves and loads the same way for both kinds."""
+
+    def __init__(self, config, *, booster=None, network=None, mean=None, std=None):
+        self.config, self.booster, self.network = config, booster, network
+        self.mean, self.std = mean, std
+        self.device = config["device"]
+
+    def prepare(self, features):
+        scaled = np.nan_to_num((features - self.mean) / self.std)
+        return torch.as_tensor(scaled.astype(np.float32))
+
+    def predict(self, features):
+        if self.booster is not None:
+            return self.booster.predict(features)
         with torch.no_grad():
-            return network(prepare(features).to(device)).cpu().numpy() / BP
+            return self.network(self.prepare(features).to(self.device)).cpu().numpy() / BP
 
-    return predict, network
+    def save(self, folder):
+        if self.booster is not None:
+            self.booster.save_model(str(folder / "daily.txt"))
+            return ["daily.txt"]
+        torch.save(self.network.state_dict(), folder / "daily.pt")
+        np.savez(folder / "daily-scale.npz", mean=self.mean, std=self.std)
+        return ["daily.pt", "daily-scale.npz"]
+
+    @classmethod
+    def load(cls, folder, config):
+        if config["daily"]["model"] == "lgbm":
+            return cls(config, booster=lgb.Booster(model_file=str(folder / "daily.txt")))
+        scale = np.load(folder / "daily-scale.npz")
+        network = DailyMLP(len(DAILY_FEATURES), config["daily"]["width"])
+        network.load_state_dict(torch.load(folder / "daily.pt", map_location="cpu"))
+        model = cls(config, network=network.eval(), mean=scale["mean"], std=scale["std"])
+        model.network.to(model.device)
+        return model
 
 
 def _select(prediction, valid, costs_bp, k, trainable, *, gate=False, threshold_bp=0.0):
@@ -214,6 +248,36 @@ def _holding(root, symbols, frame, days, allowed):
     return total / np.concatenate([[1.0], total[:-1]]) - 1
 
 
+class FinalGrant:
+    """Issued by `hft.ml.search.run_final` after it records the one-time test run."""
+
+
+def code_commit() -> str:
+    """The code version: the git commit (with a dirty flag), or the COMMIT file that
+    packaging puts into the Kaggle code archive."""
+    root = Path(__file__).resolve().parents[2]
+    if (root / "COMMIT").exists():
+        return (root / "COMMIT").read_text().strip()
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        return head + ("-dirty" if dirty.strip() else "")
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def _sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 @dataclass
 class Inputs:
     root: Path
@@ -223,6 +287,7 @@ class Inputs:
     session_rows: dict
     costs_bp: np.ndarray
     trainable: np.ndarray
+    data_hash: str
 
 
 def load_inputs(data_root, symbols=None) -> Inputs:
@@ -239,6 +304,7 @@ def load_inputs(data_root, symbols=None) -> Inputs:
         _session_rows(store, symbols),
         _costs(symbols),
         np.array([s not in trade_only for s in symbols]),
+        data_fingerprint(root),
     )
 
 
@@ -246,8 +312,26 @@ def _key(*parts):
     return json.dumps(parts, sort_keys=True, default=str)
 
 
-def run_variant(config, data_root, out, *, split="validation", trials=1, inputs=None, cache=None):
-    """Train (or reuse from `cache`) and score one variant; returns its metrics."""
+def run_variant(
+    config,
+    data_root,
+    out,
+    *,
+    split="validation",
+    trials=1,
+    inputs=None,
+    cache=None,
+    saved=None,
+    grant=None,
+    confidence=95.0,
+):
+    """Train (or reuse from `cache`, or load from `saved`) and score one variant.
+
+    The test split needs a `FinalGrant` from `hft.ml.search.run_final`, which records
+    that the one-time test was used and scores only saved, frozen models.
+    """
+    if split == "test" and not (isinstance(grant, FinalGrant) and saved is not None):
+        raise PermissionError("the test split is scored only through hft.ml.search.run_final")
     config = _merge(DEFAULT, config)
     torch.set_num_threads(config["threads"])
     rng = np.random.default_rng(config["seed"])
@@ -271,10 +355,15 @@ def run_variant(config, data_root, out, *, split="validation", trials=1, inputs=
         config["seed"],
         split,
     )
-    if daily_key not in cache:
+    if saved is not None:
+        cache.pop(daily_key, None)
+        daily_model = DailyModel.load(Path(saved), config)
+    elif daily_key not in cache:
         labels = _daily_target(inputs, settings_daily["target"])
-        predict, daily_model = _fit_daily(config, frame, labels, train_days, device)
-        predicted = predict(frame.x[rows].reshape(-1, frame.x.shape[-1])).reshape(len(rows), -1)
+        daily_model = _fit_daily(config, frame, labels, train_days, device)
+    if daily_key not in cache:
+        features = frame.x[rows].reshape(-1, frame.x.shape[-1])
+        predicted = daily_model.predict(features).reshape(len(rows), -1)
         cache[daily_key] = (predicted, daily_model)
     predicted, daily_model = cache[daily_key]
     picks = _select(
@@ -293,7 +382,13 @@ def run_variant(config, data_root, out, *, split="validation", trials=1, inputs=
         "minute", {k: v for k, v in settings.items() if k != "margin_bp"}, config["seed"]
     )
     if settings["model"] != "none":
-        if minute_key not in cache:
+        if saved is not None:
+            minute_model = MINUTE_MODELS[settings["model"]](len(CHANNELS), settings["width"])
+            minute_model.load_state_dict(torch.load(Path(saved) / "minute.pt", map_location="cpu"))
+            minute_model = minute_model.to(device).eval()
+            minute_key = _key("saved", str(saved))
+            cache[minute_key] = minute_model
+        elif minute_key not in cache:
             cache[minute_key] = _fit_minute(config, store, symbols, frame, train_days, rng, device)
         minute_model = cache[minute_key]
 
@@ -340,8 +435,8 @@ def run_variant(config, data_root, out, *, split="validation", trials=1, inputs=
         daily_3x.append(day_3x[0])
 
     holding = _holding(root, symbols, frame, score_days, trainable)
-    metrics = report(daily_returns, holding, trade_returns, trials=trials)
-    triple = report(daily_3x, holding, trade_3x, trials=trials)
+    metrics = report(daily_returns, holding, trade_returns, trials=trials, confidence=confidence)
+    triple = report(daily_3x, holding, trade_3x, trials=trials, confidence=confidence)
     metrics["at_3x_cost"] = {
         key: triple[key]
         for key in (
@@ -360,18 +455,20 @@ def run_variant(config, data_root, out, *, split="validation", trials=1, inputs=
             "first_day": str(frame.dates[rows[0]]),
             "last_day": str(frame.dates[rows[-1]]),
             "days_with_trades": int(sum(1 for r in daily_returns if r != 0)),
+            "data_hash": inputs.data_hash,
+            "code": code_commit(),
         }
     )
     folder = Path(out) / variant_id(config)
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / "config.json").write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
+    if saved is None:  # a frozen model's files are never overwritten
+        names = daily_model.save(folder)
+        if minute_model is not None:
+            torch.save(minute_model.state_dict(), folder / "minute.pt")
+            names.append("minute.pt")
+        metrics["weights"] = {name: _sha256(folder / name) for name in names}
+        (folder / "config.json").write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
     (folder / f"metrics-{split}.json").write_text(json.dumps(metrics, indent=2) + "\n")
-    if config["daily"]["model"] == "lgbm":
-        daily_model.save_model(str(folder / "daily.txt"))
-    else:
-        torch.save(daily_model.state_dict(), folder / "daily.pt")
-    if minute_model is not None:
-        torch.save(minute_model.state_dict(), folder / "minute.pt")
     return metrics
 
 
@@ -380,19 +477,9 @@ def main(argv=None):
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--data", type=Path, default=Path("data/ml"))
     parser.add_argument("--out", type=Path, default=Path("artifacts/ml"))
-    parser.add_argument("--final", action="store_true", help="score the one-time test split")
-    parser.add_argument("--frozen", type=Path, help="JSON list of variant ids chosen earlier")
-    parser.add_argument("--trials", type=int, default=1, help="variants tried in the search")
     args = parser.parse_args(argv)
     config = json.loads(args.config.read_text())
-    split = "validation"
-    if args.final:
-        if not args.frozen or variant_id(_merge(DEFAULT, config)) not in json.loads(
-            args.frozen.read_text()
-        ):
-            parser.error("--final needs --frozen listing this variant, chosen before the test")
-        split = "test"
-    metrics = run_variant(config, args.data, args.out, split=split, trials=args.trials)
+    metrics = run_variant(config, args.data, args.out)
     print(json.dumps(metrics, indent=2))
     return 0
 

@@ -72,3 +72,26 @@ def load_dataset(path) -> DailyFrame:
         data["label"],
         data["valid"],
     )
+
+
+def data_manifest(root) -> dict:
+    """SHA-256 of every bar file and the calendar under a download root."""
+    root = Path(root)
+    files = sorted([*root.rglob("*.parquet"), root / "calendar.json"])
+    return {str(f.relative_to(root)): _sha256(f) for f in files if f.exists()}
+
+
+def write_data_manifest(root) -> dict:
+    manifest = data_manifest(root)
+    (Path(root) / "manifest.json").write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
+    return manifest
+
+
+def data_fingerprint(root) -> str:
+    """One hash identifying the data. With a saved manifest (written when the data was
+    packaged), any missing, extra or changed file is refused."""
+    current = data_manifest(root)
+    saved_path = Path(root) / "manifest.json"
+    if saved_path.exists() and json.loads(saved_path.read_text()) != current:
+        raise ValueError("market data does not match its manifest")
+    return hashlib.sha256(json.dumps(current, sort_keys=True).encode()).hexdigest()

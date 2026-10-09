@@ -73,6 +73,7 @@ class ReadOnlyClient:
             and parsed.netloc == "data.alpaca.markets"
             and (
                 re.fullmatch(r"/v2/stocks/[A-Z0-9.-]+/(quotes|trades|bars)(/latest)?", parsed.path)
+                or parsed.path == "/v2/stocks/trades/latest"
                 or parsed.path == "/v1beta1/news"
             )
             and not parsed.query

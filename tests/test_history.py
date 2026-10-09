@@ -131,6 +131,7 @@ def test_readonly_transport_retry_budget_and_nonretryable():
     c = ReadOnlyClient("fake", "fake", transport=transport, clock=lambda: now[0], sleep=sleep)
     assert c.get("https://data.alpaca.markets/v2/stocks/X/quotes", {}) == {"ok": True}
     assert 2 in sleeps
+    assert c.get("https://data.alpaca.markets/v2/stocks/trades/latest", {}) == {"ok": True}
     for i in range(151):
         c.get("https://paper-api.alpaca.markets/v2/calendar", {})
     assert now[0] >= 60

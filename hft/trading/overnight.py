@@ -169,6 +169,9 @@ class OvernightBook(SymbolBook):
 _DATA_CLIENT = None
 
 
+LATEST_BATCH = 100  # symbols per latest-trades request
+
+
 def last_trade_prices(symbols):
     """{symbol: (price, trade time in UTC ns)} from the latest IEX trades (read-only)."""
     from ..feed import parse_timestamp
@@ -179,15 +182,20 @@ def last_trade_prices(symbols):
         _DATA_CLIENT = ReadOnlyClient()  # one client, so its request budget holds
     client = _DATA_CLIENT
     prices = {}
-    for symbol in symbols:
-        payload = client.get(f"{DATA_BASE}/v2/stocks/{symbol}/trades/latest", {"feed": "iex"})
-        trade = payload.get("trade") if isinstance(payload, dict) else None
-        if not isinstance(trade, dict) or "p" not in trade or "t" not in trade:
-            raise ValueError(f"no latest trade for {symbol}")
-        price = decimal(str(trade["p"]))
-        if not price.is_finite() or price <= 0:
-            raise ValueError(f"invalid latest trade for {symbol}")
-        prices[symbol] = (price, parse_timestamp(trade["t"]))
+    for start in range(0, len(symbols), LATEST_BATCH):
+        batch = symbols[start : start + LATEST_BATCH]
+        payload = client.get(
+            f"{DATA_BASE}/v2/stocks/trades/latest", {"symbols": ",".join(batch), "feed": "iex"}
+        )
+        trades = payload.get("trades") if isinstance(payload, dict) else None
+        for symbol in batch:
+            trade = trades.get(symbol) if isinstance(trades, dict) else None
+            if not isinstance(trade, dict) or "p" not in trade or "t" not in trade:
+                raise ValueError(f"no latest trade for {symbol}")
+            price = decimal(str(trade["p"]))
+            if not price.is_finite() or price <= 0:
+                raise ValueError(f"invalid latest trade for {symbol}")
+            prices[symbol] = (price, parse_timestamp(trade["t"]))
     return prices
 
 

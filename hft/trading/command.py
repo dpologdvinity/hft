@@ -16,13 +16,15 @@ from ..strategies import STRATEGY_VERSION, parse_strategy
 from .budget import budget_gateway, budget_risk_config
 from .stream import MAX_SYMBOLS
 
+SCHEDULED_SYMBOLS = 100
+
 SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,14}")
 RUN_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 LIVE_REFUSAL = "real money unlocks after research qualification and 30-session paper graduation"
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def parse_symbols(items) -> dict[str, Decimal]:
+def parse_symbols(items, limit=MAX_SYMBOLS) -> dict[str, Decimal]:
     budgets = {}
     for item in items or ():
         symbol, sep, amount = item.partition("=")
@@ -38,8 +40,8 @@ def parse_symbols(items) -> dict[str, Decimal]:
         if symbol in budgets:
             raise ValueError(f"{symbol} is listed twice")
         budgets[symbol] = budget
-    if not 1 <= len(budgets) <= MAX_SYMBOLS:
-        raise ValueError(f"choose 1-{MAX_SYMBOLS} stocks with --symbols SYMBOL=DOLLARS")
+    if not 1 <= len(budgets) <= limit:
+        raise ValueError(f"choose 1-{limit} stocks with --symbols SYMBOL=DOLLARS")
     return budgets
 
 
@@ -90,8 +92,11 @@ def handle_trade(args):
         return handle_replay(args)
     if args.live or not args.paper:
         raise ValueError(LIVE_REFUSAL)
-    budgets = parse_symbols(args.symbols)
     strategy = parse_strategy(args.strategy)
+    # Scheduled strategies poll prices over REST, so the stream's symbol limit does not apply.
+    budgets = parse_symbols(
+        args.symbols, SCHEDULED_SYMBOLS if strategy.is_scheduled else MAX_SYMBOLS
+    )
     if strategy.version != STRATEGY_VERSION:
         raise ValueError("unsupported strategy version")
     if strategy.bundle is not None and not strategy.is_scheduled:

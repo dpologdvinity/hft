@@ -439,3 +439,30 @@ def test_news_picks_buy_after_the_open_and_sell_before_the_close(tmp_path):
     assert Decimal(summary["SMALL"]["position"]) == 0 and summary["SMALL"]["trades"] == 1
     rows = _rows(tmp_path, "SMALL")
     assert any(r["event"] == "picks" and r["picked"] for r in rows)
+
+
+def test_last_trade_prices_batches_symbols(monkeypatch):
+    from hft.trading import overnight
+
+    calls = []
+
+    class FakeClient:
+        def get(self, url, params):
+            calls.append((url, params))
+            names = params["symbols"].split(",")
+            return {"trades": {n: {"p": 10.5, "t": "2025-01-06T14:31:00Z"} for n in names}}
+
+    monkeypatch.setattr(overnight, "_DATA_CLIENT", FakeClient())
+    monkeypatch.setattr(overnight, "LATEST_BATCH", 2)
+    prices = overnight.last_trade_prices(["AAPL", "MSFT", "KO"])
+    assert [c[1]["symbols"] for c in calls] == ["AAPL,MSFT", "KO"]
+    assert all(c[0].endswith("/v2/stocks/trades/latest") for c in calls)
+    assert prices["KO"] == (Decimal("10.5"), 1_736_173_860 * NS)
+
+    class Missing(FakeClient):
+        def get(self, url, params):
+            return {"trades": {}}
+
+    monkeypatch.setattr(overnight, "_DATA_CLIENT", Missing())
+    with pytest.raises(ValueError, match="no latest trade for AAPL"):
+        overnight.last_trade_prices(["AAPL"])

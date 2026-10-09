@@ -38,6 +38,10 @@ def test_symbol_budget_parsing():
     ):
         with pytest.raises(ValueError):
             parse_symbols(bad)
+    many = [f"A{i}=1" for i in range(68)]
+    assert len(parse_symbols(many, limit=100)) == 68
+    with pytest.raises(ValueError, match="1-30"):
+        parse_symbols(many)
 
 
 def test_run_names_are_validated(tmp_path):

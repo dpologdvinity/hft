@@ -61,7 +61,26 @@ def news_grid(device="cpu", threads=1, seed=0):
     ]
 
 
-GRIDS = {"price": grid, "news": news_grid}
+def sentiment_grid(device="cpu", threads=1, seed=0):
+    """The news grid's daily settings with FinBERT sentiment added, held from the open
+    (8 variants; the GRU timing never helped)."""
+    daily = [
+        {"model": model, "target": "return", "k": k, "gate": gate, "news": True, "sentiment": True}
+        for model, k, gate in itertools.product(("lgbm", "mlp"), (3, 5), (False, True))
+    ]
+    return [
+        {
+            "seed": seed,
+            "device": device,
+            "threads": threads,
+            "daily": d,
+            "minute": {"model": "none"},
+        }
+        for d in daily
+    ]
+
+
+GRIDS = {"price": grid, "news": news_grid, "sentiment": sentiment_grid}
 
 
 def run_search(configs, data_root, out, *, symbols=None, log=print, prior_trials=0):

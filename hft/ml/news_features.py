@@ -131,3 +131,57 @@ def news_features(news, symbols, dates, sessions) -> np.ndarray:
         if k is not None:
             out[d] = full[k]
     return out
+
+
+SENTIMENT_FEATURES = ("news_sent_mean", "news_sent_max", "news_sent_min", "news_market_sent")
+
+
+def sentiment_features(news, scores, symbols, dates, sessions) -> np.ndarray:
+    """(D, S, 4) features from per-article sentiment scores (positive minus negative
+    probability, for example from FinBERT), over the same pre-open windows and focused
+    articles as `news_features`. Symbol-days without a scored article get zeros."""
+    index = {s: i for i, s in enumerate(symbols)}
+    session_of = {np.datetime64(w.session_id, "D"): k for k, w in enumerate(sessions)}
+    starts, ends = _windows(sessions)
+    total = np.zeros((len(sessions), len(symbols)), dtype=np.float64)
+    count = np.zeros_like(total)
+    high = np.full_like(total, -np.inf)
+    low = np.full_like(total, np.inf)
+    market_total = np.zeros(len(sessions))
+    market_count = np.zeros(len(sessions))
+    created = news.column("created_ns").to_numpy()
+    ids = news.column("id").to_numpy()
+    window = np.searchsorted(starts, created, side="right") - 1
+    inside = (window >= 0) & (created < ends[np.clip(window, 0, None)])
+    tagged = news.column("symbols").to_pylist()
+    for row in np.flatnonzero(inside):
+        names, score = tagged[row] or [], scores.get(int(ids[row]))
+        if score is None or len(names) > FOCUSED_SYMBOLS:
+            continue
+        k = window[row]
+        market_total[k] += score
+        market_count[k] += 1
+        for name in names:
+            s = index.get(name)
+            if s is None:
+                continue
+            total[k, s] += score
+            count[k, s] += 1
+            high[k, s] = max(high[k, s], score)
+            low[k, s] = min(low[k, s], score)
+    seen = count > 0
+    full = np.stack(
+        [
+            np.where(seen, total / np.maximum(count, 1), 0.0),
+            np.where(seen, high, 0.0),
+            np.where(seen, low, 0.0),
+            np.broadcast_to((market_total / np.maximum(market_count, 1))[:, None], total.shape),
+        ],
+        axis=-1,
+    ).astype(np.float32)
+    out = np.zeros((len(dates), len(symbols), len(SENTIMENT_FEATURES)), dtype=np.float32)
+    for d, day in enumerate(np.asarray(dates).astype("datetime64[D]")):
+        k = session_of.get(day)
+        if k is not None:
+            out[d] = full[k]
+    return out

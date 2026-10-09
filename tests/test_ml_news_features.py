@@ -88,3 +88,29 @@ def test_only_news_before_the_cutoff_counts_for_a_session():
     # The 11:00 guidance cut belongs to no pre-open window; the 09:26 downgrade neither.
     assert x[2, nvda, f["news_down"]] == 0
     assert x[2, nvda, f["news_attention_5d"]] == 3  # earlier sessions' article counts
+
+
+def test_sentiment_features_average_focused_pre_open_scores():
+    from hft.ml.news_features import SENTIMENT_FEATURES, sentiment_features
+
+    news = _news(
+        [
+            ("2023-01-03T20:00:00-05:00", "Nvidia soars", ("NVDA",)),
+            ("2023-01-04T08:00:00-05:00", "Nvidia slips", ("NVDA",)),
+            ("2023-01-04T09:40:00-05:00", "Nvidia late news", ("NVDA",)),  # after the cutoff
+            (
+                "2023-01-04T07:00:00-05:00",
+                "Roundup",
+                ("AAPL", "NVDA", "INTC", "AMD"),
+            ),  # not focused
+        ]
+    )
+    scores = {0: 0.8, 1: -0.2, 2: -0.9, 3: 0.5}
+    dates = np.array(["2023-01-04"], dtype="datetime64[D]")
+    x = sentiment_features(news, scores, ["NVDA", "AAPL"], dates, SESSIONS)
+    f = {name: i for i, name in enumerate(SENTIMENT_FEATURES)}
+    assert x[0, 0, f["news_sent_mean"]] == pytest.approx(0.3)
+    assert x[0, 0, f["news_sent_max"]] == pytest.approx(0.8)
+    assert x[0, 0, f["news_sent_min"]] == pytest.approx(-0.2)
+    assert x[0, 1, f["news_sent_mean"]] == 0  # AAPL only in the roundup
+    assert x[0, 1, f["news_market_sent"]] == pytest.approx(0.3)  # focused articles, all symbols

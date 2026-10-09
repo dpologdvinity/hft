@@ -19,6 +19,7 @@ from pathlib import Path
 
 import lightgbm as lgb
 import numpy as np
+import pyarrow.parquet as pq
 import torch
 
 from .datasets import data_fingerprint, split_mask
@@ -28,7 +29,7 @@ from .features import CHANNELS, DAILY_FEATURES, _aligned, daily_frame, minute_st
 from .fills import SLIPPAGE_BPS, half_spread_bps, simulate_day
 from .models import MINUTE_MODELS, DailyMLP, fit_torch, train_lightgbm
 from .news import read_news
-from .news_features import NEWS_FEATURES, news_features
+from .news_features import NEWS_FEATURES, SENTIMENT_FEATURES, news_features, sentiment_features
 from .universe import UNIVERSE
 
 DEFAULT = {
@@ -40,6 +41,7 @@ DEFAULT = {
         "k": 5,
         "gate": False,  # True: only pick symbols whose predicted return beats the cost
         "news": False,  # True: add the pre-open news features (hft.ml.news_features)
+        "sentiment": False,  # True: add FinBERT sentiment of the pre-open headlines
         "threshold_bp": 0.0,
         "width": 64,
         "epochs": 20,
@@ -110,15 +112,22 @@ def _daily_target(inputs, target):
 
 def _daily_x(inputs, config):
     """The daily model's inputs: price features, plus news features when asked for."""
-    if not config["daily"]["news"]:
-        return inputs.frame.x
-    if inputs.news_x is None:
-        raise ValueError("daily.news needs news data; run python -m hft.ml.news first")
-    return np.concatenate([inputs.frame.x, inputs.news_x], axis=-1)
+    parts = [inputs.frame.x]
+    if config["daily"]["news"]:
+        if inputs.news_x is None:
+            raise ValueError("daily.news needs news data; run python -m hft.ml.news first")
+        parts.append(inputs.news_x)
+    if config["daily"]["sentiment"]:
+        if inputs.sentiment_x is None:
+            raise ValueError("daily.sentiment needs data/ml/finbert/scores.parquet")
+        parts.append(inputs.sentiment_x)
+    return parts[0] if len(parts) == 1 else np.concatenate(parts, axis=-1)
 
 
 def _daily_features(config):
-    return len(DAILY_FEATURES) + (len(NEWS_FEATURES) if config["daily"]["news"] else 0)
+    news = len(NEWS_FEATURES) if config["daily"]["news"] else 0
+    sentiment = len(SENTIMENT_FEATURES) if config["daily"]["sentiment"] else 0
+    return len(DAILY_FEATURES) + news + sentiment
 
 
 def _fit_daily(config, x_all, frame, labels, train_days, device):
@@ -316,6 +325,7 @@ class Inputs:
     trainable: np.ndarray
     data_hash: str
     news_x: np.ndarray | None = None  # (D, S, news features), when news was downloaded
+    sentiment_x: np.ndarray | None = None  # (D, S, sentiment features), when scored
 
 
 def load_inputs(data_root, symbols=None) -> Inputs:
@@ -326,9 +336,23 @@ def load_inputs(data_root, symbols=None) -> Inputs:
     calendar = load_calendar(root)
     store = minute_store(root, symbols, calendar)
     frame = daily_frame(root, symbols)
-    news_x = None
+    news_x = sentiment_x = None
     if (root / "news").exists():
-        news_x = news_features(read_news(root), symbols, frame.dates, calendar)
+        news = read_news(root)
+        news_x = news_features(news, symbols, frame.dates, calendar)
+        scores_path = root / "finbert" / "scores.parquet"
+        if scores_path.exists():
+            table = pq.read_table(scores_path)
+            scores = dict(
+                zip(
+                    table.column("id").to_pylist(),
+                    (
+                        table.column("positive").to_numpy() - table.column("negative").to_numpy()
+                    ).tolist(),
+                    strict=True,
+                )
+            )
+            sentiment_x = sentiment_features(news, scores, symbols, frame.dates, calendar)
     return Inputs(
         root,
         symbols,
@@ -339,6 +363,7 @@ def load_inputs(data_root, symbols=None) -> Inputs:
         np.array([s not in trade_only for s in symbols]),
         data_fingerprint(root),
         news_x,
+        sentiment_x,
     )
 
 
@@ -385,6 +410,7 @@ def run_variant(
         settings_daily["model"],
         settings_daily["target"],
         settings_daily["news"],
+        settings_daily["sentiment"],
         settings_daily["width"],
         settings_daily["epochs"],
         config["seed"],

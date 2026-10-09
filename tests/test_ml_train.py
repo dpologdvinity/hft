@@ -296,3 +296,42 @@ def test_news_features_join_the_daily_model_when_asked(market, tmp_path):
     assert len(NEWS_FEATURES) == 9
     with pytest.raises(ValueError, match="news"):
         run_variant(config, market, tmp_path / "no-news")  # the shared fixture has no news
+
+
+def test_sentiment_features_join_the_daily_model_when_scored(market, tmp_path):
+    import shutil
+
+    from hft.ml.news import SCHEMA as NEWS_SCHEMA
+    from hft.ml.search import sentiment_grid
+
+    root = tmp_path / "with-sentiment"
+    shutil.copytree(market, root)
+    (root / "news").mkdir()
+    (root / "finbert").mkdir()
+    stamp = int(datetime(2022, 7, 5, 12, tzinfo=UTC).timestamp()) * NS
+    pq.write_table(
+        pa.table(
+            {
+                "id": [1],
+                "created_ns": [stamp],
+                "updated_ns": [stamp],
+                "headline": ["AAA upgraded"],
+                "summary": [""],
+                "source": ["benzinga"],
+                "symbols": [["AAA"]],
+            },
+            schema=NEWS_SCHEMA,
+        ),
+        root / "news" / "2022-07.parquet",
+    )
+    pq.write_table(
+        pa.table({"id": [1], "positive": [0.9], "negative": [0.05], "neutral": [0.05]}),
+        root / "finbert" / "scores.parquet",
+    )
+    config = {
+        **CONFIG,
+        "daily": {"k": 2, "news": True, "sentiment": True},
+        "minute": {"model": "none"},
+    }
+    assert run_variant(config, root, tmp_path / "out")["strategy"]["days"] > 100
+    assert len(sentiment_grid()) == 8

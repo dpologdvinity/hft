@@ -157,6 +157,26 @@ proves the order flow; it is not evidence of an edge.
 
 Real money is refused until a strategy passes research and 30 paper sessions.
 
+## ML day trader (in progress)
+
+A daily model picks which of 69 symbols to watch each day, and a minute model times
+one long round trip in each, flat five minutes before the close. Trees (LightGBM) and
+networks (1-D convolution, GRU, transformer) are trained as many variants and judged
+against simply holding the same symbols on years they never saw
+([design](docs/specs/2026-10-08-ml-daytrader-design.md)).
+
+```bash
+python -m hft.ml.download --timeframe 1Day      # free Alpaca SIP bars since 2016
+python -m hft.ml.download --timeframe 1Min      # about 70 million minute bars
+python -m hft.ml.search --limit 4 --symbols AAPL NVDA   # small CPU smoke run
+python -m hft.ml.package                        # zips for a Kaggle GPU run
+```
+
+The full 84-variant search runs on a free Kaggle GPU with
+[notebooks/kaggle_train.ipynb](notebooks/kaggle_train.ipynb). A first smoke run on
+14 stocks found no variant close to holding them (see the
+[project history](docs/project-history.md)).
+
 ## Research workflow
 
 ```bash

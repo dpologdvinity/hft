@@ -47,14 +47,33 @@ def grid(device="cpu", threads=1, seed=0):
     ]
 
 
-def run_search(configs, data_root, out, *, symbols=None, log=print):
+def news_grid(device="cpu", threads=1, seed=0):
+    """The news search: the 8 return-target daily settings with news features, each
+    held from the open or timed by the 30-minute GRU (16 variants)."""
+    daily = [
+        {"model": model, "target": "return", "k": k, "gate": gate, "news": True}
+        for model, k, gate in itertools.product(("lgbm", "mlp"), (3, 5), (False, True))
+    ]
+    minute = [{"model": "none"}, {"model": "gru", "horizon": 30}]
+    return [
+        {"seed": seed, "device": device, "threads": threads, "daily": d, "minute": m}
+        for d, m in itertools.product(daily, minute)
+    ]
+
+
+GRIDS = {"price": grid, "news": news_grid}
+
+
+def run_search(configs, data_root, out, *, symbols=None, log=print, prior_trials=0):
+    """`prior_trials`: variants already scored on the same validation years elsewhere
+    (for example the 84 price-only variants), added to the trial count."""
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     inputs = load_inputs(data_root, symbols)
     cache, results = {}, []
     log_path = out / "runs.jsonl"
     earlier = len(log_path.read_text().splitlines()) if log_path.exists() else 0
-    trials = earlier + len(configs)  # every variant ever tried in this search folder
+    trials = prior_trials + earlier + len(configs)  # every variant tried on these years
     with open(out / "runs.jsonl", "a") as runs:
         for number, config in enumerate(configs, 1):
             config = {**config, "symbols": symbols}
@@ -149,6 +168,10 @@ def main(argv=None):
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--symbols", nargs="*", help="default: every trainable symbol")
     parser.add_argument("--limit", type=int, help="run only the first N variants (smoke test)")
+    parser.add_argument("--grid", choices=sorted(GRIDS), default="price")
+    parser.add_argument(
+        "--prior-trials", type=int, default=0, help="variants already tried on these years"
+    )
     parser.add_argument(
         "--final", action="store_true", help="score the frozen variants on the test split, once"
     )
@@ -156,8 +179,10 @@ def main(argv=None):
     if args.final:
         print(json.dumps(run_final(args.out, args.data, args.out / "final"), indent=2))
         return 0
-    configs = grid(args.device, args.threads)[: args.limit]
-    summary = run_search(configs, args.data, args.out, symbols=args.symbols)
+    configs = GRIDS[args.grid](args.device, args.threads)[: args.limit]
+    summary = run_search(
+        configs, args.data, args.out, symbols=args.symbols, prior_trials=args.prior_trials
+    )
     print(json.dumps(summary, indent=2))
     return 0
 

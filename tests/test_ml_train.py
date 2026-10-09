@@ -251,3 +251,48 @@ def test_trials_count_every_variant_ever_tried_in_a_search_folder(market, tmp_pa
     run_search(configs, market, tmp_path, symbols=["AAA", "BBB"], log=lambda _: None)
     summary = run_search(configs, market, tmp_path, symbols=["AAA", "BBB"], log=lambda _: None)
     assert summary["trials"] == 2
+
+
+def test_news_features_join_the_daily_model_when_asked(market, tmp_path):
+    import shutil
+
+    from hft.ml.news import SCHEMA as NEWS_SCHEMA
+    from hft.ml.news_features import NEWS_FEATURES
+    from hft.ml.search import news_grid, run_search
+
+    root = tmp_path / "with-news"
+    shutil.copytree(market, root)
+    (root / "news").mkdir()
+    stamps = [int(datetime(2022, 7, 5 + i, 12, tzinfo=UTC).timestamp()) * NS for i in range(3)]
+    pq.write_table(
+        pa.table(
+            {
+                "id": [1, 2, 3],
+                "created_ns": stamps,
+                "updated_ns": stamps,
+                "headline": ["AAA upgraded to Buy", "BBB misses estimates", "AAA beats"],
+                "summary": [""] * 3,
+                "source": ["benzinga"] * 3,
+                "symbols": [["AAA"], ["BBB"], ["AAA"]],
+            },
+            schema=NEWS_SCHEMA,
+        ),
+        root / "news" / "2022-07.parquet",
+    )
+    config = {**CONFIG, "daily": {"k": 2, "news": True}, "minute": {"model": "none"}}
+    metrics = run_variant(config, root, tmp_path / "out")
+    assert metrics["strategy"]["days"] > 100
+    configs = news_grid()
+    assert len(configs) == 16 and all(c["daily"]["news"] for c in configs)
+    summary = run_search(
+        [config],
+        root,
+        tmp_path / "search",
+        symbols=["AAA", "BBB"],
+        log=lambda _: None,
+        prior_trials=84,
+    )
+    assert summary["trials"] == 85
+    assert len(NEWS_FEATURES) == 9
+    with pytest.raises(ValueError, match="news"):
+        run_variant(config, market, tmp_path / "no-news")  # the shared fixture has no news

@@ -27,6 +27,8 @@ from .evaluate import report
 from .features import CHANNELS, DAILY_FEATURES, _aligned, daily_frame, minute_store, windows
 from .fills import SLIPPAGE_BPS, half_spread_bps, simulate_day
 from .models import MINUTE_MODELS, DailyMLP, fit_torch, train_lightgbm
+from .news import read_news
+from .news_features import NEWS_FEATURES, news_features
 from .universe import UNIVERSE
 
 DEFAULT = {
@@ -37,6 +39,7 @@ DEFAULT = {
         "target": "return",  # return: today's open-to-close move; range: log(high / low)
         "k": 5,
         "gate": False,  # True: only pick symbols whose predicted return beats the cost
+        "news": False,  # True: add the pre-open news features (hft.ml.news_features)
         "threshold_bp": 0.0,
         "width": 64,
         "epochs": 20,
@@ -105,8 +108,21 @@ def _daily_target(inputs, target):
     return np.where(inputs.frame.valid, out, np.nan)
 
 
-def _fit_daily(config, frame, labels, train_days, device):
-    x = frame.x[train_days]
+def _daily_x(inputs, config):
+    """The daily model's inputs: price features, plus news features when asked for."""
+    if not config["daily"]["news"]:
+        return inputs.frame.x
+    if inputs.news_x is None:
+        raise ValueError("daily.news needs news data; run python -m hft.ml.news first")
+    return np.concatenate([inputs.frame.x, inputs.news_x], axis=-1)
+
+
+def _daily_features(config):
+    return len(DAILY_FEATURES) + (len(NEWS_FEATURES) if config["daily"]["news"] else 0)
+
+
+def _fit_daily(config, x_all, frame, labels, train_days, device):
+    x = x_all[train_days]
     y = labels[train_days]
     keep = frame.valid[train_days] & np.isfinite(y)  # a missing bar leaves no label
     rows = np.flatnonzero(keep.any(axis=1))
@@ -125,7 +141,7 @@ def _fit_daily(config, frame, labels, train_days, device):
     )
     torch.manual_seed(config["seed"])
     model.network = fit_torch(
-        DailyMLP(len(DAILY_FEATURES), settings["width"]),
+        DailyMLP(x_all.shape[-1], settings["width"]),
         model.prepare(x[fit]),
         torch.as_tensor(y[fit] * BP),
         epochs=settings["epochs"],
@@ -165,7 +181,7 @@ class DailyModel:
         if config["daily"]["model"] == "lgbm":
             return cls(config, booster=lgb.Booster(model_file=str(folder / "daily.txt")))
         scale = np.load(folder / "daily-scale.npz")
-        network = DailyMLP(len(DAILY_FEATURES), config["daily"]["width"])
+        network = DailyMLP(_daily_features(config), config["daily"]["width"])
         network.load_state_dict(torch.load(folder / "daily.pt", map_location="cpu"))
         model = cls(config, network=network.eval(), mean=scale["mean"], std=scale["std"])
         model.network.to(model.device)
@@ -299,6 +315,7 @@ class Inputs:
     costs_bp: np.ndarray
     trainable: np.ndarray
     data_hash: str
+    news_x: np.ndarray | None = None  # (D, S, news features), when news was downloaded
 
 
 def load_inputs(data_root, symbols=None) -> Inputs:
@@ -306,16 +323,22 @@ def load_inputs(data_root, symbols=None) -> Inputs:
     root = Path(data_root)
     trade_only = {s.ticker for s in UNIVERSE if s.trade_only}
     symbols = list(symbols or [s.ticker for s in UNIVERSE if not s.trade_only])
-    store = minute_store(root, symbols, load_calendar(root))
+    calendar = load_calendar(root)
+    store = minute_store(root, symbols, calendar)
+    frame = daily_frame(root, symbols)
+    news_x = None
+    if (root / "news").exists():
+        news_x = news_features(read_news(root), symbols, frame.dates, calendar)
     return Inputs(
         root,
         symbols,
-        daily_frame(root, symbols),
+        frame,
         store,
         _session_rows(store, symbols),
         _costs(symbols),
         np.array([s not in trade_only for s in symbols]),
         data_fingerprint(root),
+        news_x,
     )
 
 
@@ -361,6 +384,7 @@ def run_variant(
         "daily",
         settings_daily["model"],
         settings_daily["target"],
+        settings_daily["news"],
         settings_daily["width"],
         settings_daily["epochs"],
         config["seed"],
@@ -369,11 +393,12 @@ def run_variant(
     if saved is not None:
         cache.pop(daily_key, None)
         daily_model = DailyModel.load(Path(saved), config)
-    elif daily_key not in cache:
+    x_all = _daily_x(inputs, config)
+    if saved is None and daily_key not in cache:
         labels = _daily_target(inputs, settings_daily["target"])
-        daily_model = _fit_daily(config, frame, labels, train_days, device)
+        daily_model = _fit_daily(config, x_all, frame, labels, train_days, device)
     if daily_key not in cache:
-        features = frame.x[rows].reshape(-1, frame.x.shape[-1])
+        features = x_all[rows].reshape(-1, x_all.shape[-1])
         predicted = daily_model.predict(features).reshape(len(rows), -1)
         cache[daily_key] = (predicted, daily_model)
     predicted, daily_model = cache[daily_key]

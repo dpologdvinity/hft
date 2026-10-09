@@ -45,6 +45,13 @@ Each fix has a regression test that fails on the old code.
    row yet, so status showed holdings as near-total losses. It now reads older
    journals and never shows a holding at zero (1438cc7).
 
+6. **Overnight regulatory fees stopped the overnight run.** At 03:46 ET Alpaca posted
+   $0.40 of SEC and CAT fees for the day's intraday sales to the shared account, and
+   reconciliation stopped the run on the unexplained cash change. Fee activities are
+   now booked: split over the run's stocks by sale proceeds when the run sold that day,
+   recorded as external otherwise (954fe7c). The run was restarted at 06:10 with its
+   seven positions intact, before the opening exits.
+
 ## 2026-10-08: first overnight entry (overnight-drift, 10 stocks, $500 each)
 
 Started 15:41 ET. Seven fractional marketable limit buys at 15:57 filled within

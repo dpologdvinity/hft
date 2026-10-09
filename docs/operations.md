@@ -216,6 +216,18 @@ hours stops the run. Stopping the run
 cancels open orders but keeps positions, because the market is usually closed;
 restarting it sells them at the next open.
 
+`news-picks:<variant folder>` day-trades the picks of a frozen ML day-trader variant
+(a folder with `config.json` and saved daily weights, from `hft.ml.search`). At 08:55
+ET it refreshes the daily bars, news and calendar; between 09:30:30 and 09:35 it reads
+the first IEX trades as today's opening prices and picks with the model; from 09:31
+it buys each pick with a marketable day limit 1% above its last trade; five minutes
+before the close it sells everything. Holdings it did not buy today are sold at once.
+
+```bash
+python -m hft trade --paper --strategy news-picks:artifacts/ml-news-search/7f7b87ac489e \
+    --symbols AAPL=1000 MSFT=1000 ... --name news-picks
+```
+
 Journals go to `logs/trade/<name>/<SYMBOL>-<start_ns>.jsonl` and state to
 `.state/trade/<name>/`. Rule-strategy runs are engineering evidence only and never
 count toward graduation.

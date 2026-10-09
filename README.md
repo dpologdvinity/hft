@@ -155,6 +155,11 @@ night) but a pre-registered test with about 4 bp of auction costs per round trip
 did not clear zero ([results](docs/overnight-auction-results.md)), so the paper run
 proves the order flow; it is not evidence of an edge.
 
+`--strategy news-picks:<variant folder>` day-trades the picks of a frozen ML
+day-trader variant: it refreshes bars and news before the open, picks at the open and
+sells five minutes before the close. It runs the best news-aware variant forward on
+paper, where every session is unseen data.
+
 Real money is refused until a strategy passes research and 30 paper sessions.
 
 ## ML day trader (in progress)

@@ -3,6 +3,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute  # noqa: F401  (pa.compute)
 import pyarrow.parquet as pq
 import pytest
 
@@ -187,3 +188,22 @@ def test_a_range_target_picks_movers_and_trades(market, tmp_path):
     config = {**CONFIG, "daily": {"k": 2, "target": "range"}, "minute": {"model": "none"}}
     metrics = run_variant(config, market, tmp_path)
     assert metrics["trades"] > 100 and metrics["days_with_trades"] > 100
+
+
+def test_holding_buys_late_listings_at_their_own_first_open(market, tmp_path):
+    import shutil
+
+    late = tmp_path / "late"
+    shutil.copytree(market, late)
+    for timeframe in ("1Day", "1Min"):
+        path = late / timeframe / "BBB" / "2023.parquet"
+        table = pq.read_table(path)
+        cut = int(datetime(2023, 3, 1, tzinfo=UTC).timestamp()) * NS
+        pq.write_table(table.filter(pa.compute.greater_equal(table.column("t"), cut)), path)
+        (late / timeframe / "BBB" / "2022.parquet").unlink()
+    metrics = run_variant({**CONFIG, "minute": {"model": "none"}}, late, tmp_path / "out")
+    values = []
+    for symbol, first in (("AAA", 0), ("BBB", 1)):  # a listing is tradable from its 2nd day
+        table = pq.read_table(late / "1Day" / symbol / "2023.parquet")
+        values.append(table.column("c").to_numpy()[-1] / table.column("o").to_numpy()[first])
+    assert metrics["holding"]["total"] == pytest.approx(np.mean(values) - 1)

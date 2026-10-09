@@ -196,13 +196,16 @@ def _signal(model, store, symbol_index, symbols, row, settings, device):
 
 
 def _holding(root, symbols, frame, days, allowed):
-    """Daily returns of buying the allowed symbols equally at the first day's open."""
-    first = np.flatnonzero(days)[0]
-    members = [s for s in np.flatnonzero(allowed & frame.valid[first])]
+    """Daily returns of holding every symbol the strategy could trade in the split, in
+    equal slots: each bought at its first valid open in the split (its slot is cash
+    until then, for late listings) and held to the split's end."""
+    rows = np.flatnonzero(days)
+    members = [s for s in np.flatnonzero(allowed) if frame.valid[rows, s].any()]
     wealth = []
     for s in members:
         o, _, _, c, _ = _aligned(root, symbols[s], frame.dates)
-        value = c[days] / o[first]
+        first = rows[np.argmax(frame.valid[rows, s])]
+        value = np.where(rows >= first, c[rows] / o[first], 1.0)
         # Carry the last value through missing days.
         index = np.where(np.isfinite(value), np.arange(len(value)), 0)
         np.maximum.accumulate(index, out=index)

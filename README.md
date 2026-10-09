@@ -173,9 +173,9 @@ python -m hft.ml.package                        # zips for a Kaggle GPU run
 ```
 
 The full 84-variant search runs on a free Kaggle GPU with
-[notebooks/kaggle_train.ipynb](notebooks/kaggle_train.ipynb). A first smoke run on
-14 stocks found no variant close to holding them (see the
-[project history](docs/project-history.md)).
+[notebooks/kaggle_train.ipynb](notebooks/kaggle_train.ipynb). The first full search
+(84 variants, 2023-2024 validation) found no variant close to holding the symbols:
+the best made +13.6% against +97.2% ([results](docs/ml-daytrader-results.md)).
 
 ## Research workflow
 

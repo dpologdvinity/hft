@@ -142,3 +142,28 @@ def test_report_and_deflated_sharpe():
     assert out["beats_holding"] and out["daily_difference_ci95"][0] > 0
     assert not report(holding, strategy, holding)["beats_holding"]
     assert deflated_sharpe(1.0, 1, 500) > deflated_sharpe(1.0, 100, 500)
+
+
+def test_a_search_logs_every_variant_and_freezes_the_best(market, tmp_path):
+    from hft.ml.search import grid, run_search
+
+    configs = [
+        c
+        for c in grid()
+        if c["daily"]["model"] == "lgbm" and c["minute"]["model"] in ("none", "cnn")
+    ]
+    configs = [
+        {
+            **c,
+            "daily": {**c["daily"], "threshold_bp": -1000},
+            "minute": {**c["minute"], "epochs": 1, "per_day": 2, "width": 8},
+        }
+        for c in configs[:3]
+    ]
+    summary = run_search(configs, market, tmp_path, symbols=["AAA", "BBB"], log=lambda _: None)
+    rows = [json.loads(line) for line in (tmp_path / "runs.jsonl").read_text().splitlines()]
+    assert len(rows) == 3 and summary["trials"] == 3
+    assert all(r["trials"] == 3 for r in rows)
+    assert json.loads((tmp_path / "frozen.json").read_text()) == summary["frozen"]
+    assert set(summary["frozen"]) <= {r["variant"] for r in rows}
+    assert len(grid()) == 56

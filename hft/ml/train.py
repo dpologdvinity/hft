@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -184,26 +185,68 @@ def _holding(root, symbols, frame, days, allowed):
     return total / np.concatenate([[1.0], total[:-1]]) - 1
 
 
-def run_variant(config, data_root, out, *, split="validation", trials=1):
+@dataclass
+class Inputs:
+    root: Path
+    symbols: list
+    frame: object
+    store: dict
+    session_rows: dict
+    costs_bp: np.ndarray
+    trainable: np.ndarray
+
+
+def load_inputs(data_root, symbols=None) -> Inputs:
+    """Daily features and minute arrays, loaded once and shared by many variants."""
+    root = Path(data_root)
+    trade_only = {s.ticker for s in UNIVERSE if s.trade_only}
+    symbols = list(symbols or [s.ticker for s in UNIVERSE if not s.trade_only])
+    store = minute_store(root, symbols, load_calendar(root))
+    return Inputs(
+        root,
+        symbols,
+        daily_frame(root, symbols),
+        store,
+        _session_rows(store, symbols),
+        _costs(symbols),
+        np.array([s not in trade_only for s in symbols]),
+    )
+
+
+def _key(*parts):
+    return json.dumps(parts, sort_keys=True, default=str)
+
+
+def run_variant(config, data_root, out, *, split="validation", trials=1, inputs=None, cache=None):
+    """Train (or reuse from `cache`) and score one variant; returns its metrics."""
     config = _merge(DEFAULT, config)
     torch.set_num_threads(config["threads"])
     rng = np.random.default_rng(config["seed"])
     device = config["device"]
-    root = Path(data_root)
-    trade_only = {s.ticker for s in UNIVERSE if s.trade_only}
-    symbols = config["symbols"] or [s.ticker for s in UNIVERSE if not s.trade_only]
-    frame = daily_frame(root, symbols)
+    cache = {} if cache is None else cache
+    if inputs is None or (config["symbols"] and list(config["symbols"]) != inputs.symbols):
+        inputs = load_inputs(data_root, config["symbols"])
+    root, symbols, frame, store = inputs.root, inputs.symbols, inputs.frame, inputs.store
+    session_rows, costs_bp, trainable = inputs.session_rows, inputs.costs_bp, inputs.trainable
     train_days = split_mask(frame.dates, "train")
     score_days = split_mask(frame.dates, split)
-    costs_bp = _costs(symbols)
-    trainable = np.array([s not in trade_only for s in symbols])
-
-    predict, daily_model = _fit_daily(config, frame, train_days, device)
-    prediction = np.full(frame.label.shape, -np.inf)
     rows = np.flatnonzero(score_days)
-    prediction[rows] = predict(frame.x[rows].reshape(-1, frame.x.shape[-1])).reshape(len(rows), -1)
+
+    daily_key = _key(
+        "daily",
+        config["daily"]["model"],
+        config["daily"]["width"],
+        config["daily"]["epochs"],
+        config["seed"],
+        split,
+    )
+    if daily_key not in cache:
+        predict, daily_model = _fit_daily(config, frame, train_days, device)
+        predicted = predict(frame.x[rows].reshape(-1, frame.x.shape[-1])).reshape(len(rows), -1)
+        cache[daily_key] = (predicted, daily_model)
+    predicted, daily_model = cache[daily_key]
     picks = _select(
-        prediction[rows],
+        predicted,
         frame.valid[rows],
         costs_bp,
         config["daily"]["k"],
@@ -211,13 +254,15 @@ def run_variant(config, data_root, out, *, split="validation", trials=1):
         trainable,
     )
 
-    calendar = load_calendar(root)
-    store = minute_store(root, symbols, calendar)
-    session_rows = _session_rows(store, symbols)
     settings = config["minute"]
     minute_model = None
+    minute_key = _key(
+        "minute", {k: v for k, v in settings.items() if k != "margin_bp"}, config["seed"]
+    )
     if settings["model"] != "none":
-        minute_model = _fit_minute(config, store, symbols, frame, train_days, rng, device)
+        if minute_key not in cache:
+            cache[minute_key] = _fit_minute(config, store, symbols, frame, train_days, rng, device)
+        minute_model = cache[minute_key]
 
     daily_returns, trade_returns = [], []
     k = config["daily"]["k"]
@@ -233,7 +278,12 @@ def run_variant(config, data_root, out, *, split="validation", trials=1):
                 signal = np.full(390, np.inf)
                 enter = 0.0
             else:
-                signal = _signal(minute_model, store, s, symbols, row, settings, device)
+                signal_key = (minute_key, s, row)
+                if signal_key not in cache:
+                    cache[signal_key] = _signal(
+                        minute_model, store, s, symbols, row, settings, device
+                    )
+                signal = cache[signal_key]
                 enter = 2 * (costs_bp[s] + SLIPPAGE_BPS) + settings["margin_bp"]
             trade = simulate_day(
                 data.open[row],

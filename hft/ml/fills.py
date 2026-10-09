@@ -11,6 +11,12 @@ from dataclasses import dataclass
 import numpy as np
 
 SLIPPAGE_BPS = 1.0
+TICK = 0.01  # quotes move in whole cents, so a spread is never under one cent
+
+
+def half_spread_bps(estimate_bps, price):
+    """The symbol's estimated half-spread, but at least half a cent at this price."""
+    return max(estimate_bps, TICK / 2 / price * 1e4)
 
 
 @dataclass(frozen=True)
@@ -26,8 +32,10 @@ def _next_valid(valid, after, until):
     return int(after + 1 + candidates[0]) if len(candidates) else None
 
 
-def simulate_day(minute_open, minute_valid, signal, *, enter, half_spread_bps, last_minute):
-    cost = (half_spread_bps + SLIPPAGE_BPS) / 1e4
+def simulate_day(
+    minute_open, minute_valid, signal, *, enter, half_spread_bps, last_minute, cost_multiple=1.0
+):
+    cost = cost_multiple * (half_spread_bps + SLIPPAGE_BPS) / 1e4
     triggers = np.flatnonzero(signal[: last_minute - 1] > enter)
     if not len(triggers):
         return None

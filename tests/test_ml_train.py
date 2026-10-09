@@ -207,3 +207,10 @@ def test_holding_buys_late_listings_at_their_own_first_open(market, tmp_path):
         table = pq.read_table(late / "1Day" / symbol / "2023.parquet")
         values.append(table.column("c").to_numpy()[-1] / table.column("o").to_numpy()[first])
     assert metrics["holding"]["total"] == pytest.approx(np.mean(values) - 1)
+
+
+def test_results_are_also_reported_at_three_times_the_costs(market, tmp_path):
+    metrics = run_variant({**CONFIG, "minute": {"model": "none"}}, market, tmp_path)
+    triple = metrics["at_3x_cost"]
+    assert triple["strategy"]["total"] < metrics["strategy"]["total"]
+    assert triple["holding"] == metrics["holding"]

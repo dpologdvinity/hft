@@ -57,3 +57,19 @@ def test_no_entry_too_late_to_fill_before_the_last_minute():
     assert (
         simulate_day(opens, valid, signal, enter=0.5, half_spread_bps=1.5, last_minute=200) is None
     )
+
+
+def test_a_cost_multiple_scales_both_sides():
+    opens, valid, signal = np.full(390, 100.0), np.ones(390, bool), np.full(390, -1.0)
+    signal[0] = 1.0
+    trade = simulate_day(
+        opens, valid, signal, enter=0.5, half_spread_bps=1.5, last_minute=385, cost_multiple=3
+    )
+    assert trade.net_return == pytest.approx((1 - 3 * COST) / (1 + 3 * COST) - 1)
+
+
+def test_cheap_stocks_pay_at_least_half_a_cent():
+    from hft.ml.fills import half_spread_bps
+
+    assert half_spread_bps(1.5, 100.0) == 1.5
+    assert half_spread_bps(1.5, 5.0) == pytest.approx(10.0)  # half of one cent on $5

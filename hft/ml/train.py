@@ -23,7 +23,7 @@ from .datasets import split_mask
 from .download import load_calendar
 from .evaluate import report
 from .features import DAILY_FEATURES, _aligned, daily_frame, minute_store, windows
-from .fills import SLIPPAGE_BPS, simulate_day
+from .fills import SLIPPAGE_BPS, half_spread_bps, simulate_day
 from .models import MINUTE_MODELS, DailyMLP, fit_torch, train_lightgbm
 from .universe import UNIVERSE
 
@@ -297,16 +297,18 @@ def run_variant(config, data_root, out, *, split="validation", trials=1, inputs=
             cache[minute_key] = _fit_minute(config, store, symbols, frame, train_days, rng, device)
         minute_model = cache[minute_key]
 
-    daily_returns, trade_returns = [], []
+    daily_returns, trade_returns, daily_3x, trade_3x = [], [], [], []
     k = config["daily"]["k"]
     for d, chosen in zip(rows, picks, strict=True):
-        day_total = 0.0
+        day_total, day_3x = [0.0], [0.0]
         for s in chosen:
             symbol = symbols[s]
             row = session_rows[symbol].get(frame.dates[d])
             if row is None:
                 continue
             data = store[symbol]
+            prices = data.open[row][data.valid[row]]
+            spread = half_spread_bps(costs_bp[s], float(prices[0])) if len(prices) else costs_bp[s]
             if minute_model is None:
                 signal = np.full(390, np.inf)
                 enter = 0.0
@@ -317,22 +319,40 @@ def run_variant(config, data_root, out, *, split="validation", trials=1, inputs=
                         minute_model, store, s, symbols, row, settings, device
                     )
                 signal = cache[signal_key]
-                enter = 2 * (costs_bp[s] + SLIPPAGE_BPS) + settings["margin_bp"]
-            trade = simulate_day(
-                data.open[row],
-                data.valid[row],
-                signal,
-                enter=enter,
-                half_spread_bps=costs_bp[s],
-                last_minute=int(data.last_minute[row]),
-            )
-            if trade is not None:
-                trade_returns.append(trade.net_return)
-                day_total += trade.net_return / k
-        daily_returns.append(day_total)
+                enter = 2 * (spread + SLIPPAGE_BPS) + settings["margin_bp"]
+            for multiple, trades, totals in (
+                (1.0, trade_returns, day_total),
+                (3.0, trade_3x, day_3x),
+            ):
+                trade = simulate_day(
+                    data.open[row],
+                    data.valid[row],
+                    signal,
+                    enter=enter,
+                    half_spread_bps=spread,
+                    last_minute=int(data.last_minute[row]),
+                    cost_multiple=multiple,
+                )
+                if trade is not None:
+                    trades.append(trade.net_return)
+                    totals[0] += trade.net_return / k
+        daily_returns.append(day_total[0])
+        daily_3x.append(day_3x[0])
 
     holding = _holding(root, symbols, frame, score_days, trainable)
     metrics = report(daily_returns, holding, trade_returns, trials=trials)
+    triple = report(daily_3x, holding, trade_3x, trials=trials)
+    metrics["at_3x_cost"] = {
+        key: triple[key]
+        for key in (
+            "strategy",
+            "holding",
+            "per_trade",
+            "daily_difference",
+            "daily_difference_ci95",
+            "beats_holding",
+        )
+    }
     metrics.update(
         {
             "split": split,

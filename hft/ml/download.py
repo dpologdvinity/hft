@@ -1,0 +1,168 @@
+"""Download Alpaca SIP daily and minute bars for the ML universe, resumably.
+
+Bars are split- and dividend-adjusted (`adjustment=all`). Minute bars keep only
+regular-session minutes, cut at each session's real close from the exchange
+calendar (13:00 on half days). Each year is written atomically once all its pages
+arrived, so an interrupted run resumes at the first missing year; the latest year is
+always refreshed. Sessions reserved for the final test of the original research are
+never stored.
+
+    .venv/bin/python -m hft.ml.download --timeframe 1Day
+    .venv/bin/python -m hft.ml.download --timeframe 1Min
+"""
+
+import argparse
+import sys
+import time as time_module
+from datetime import UTC, date, datetime, time
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+from ..feed import parse_timestamp
+from ..history import DATA_BASE, ReadOnlyClient, _calendar
+from ..training import reserved_final_sessions
+from .universe import UNIVERSE
+
+NEW_YORK = ZoneInfo("America/New_York")
+SCHEMA = pa.schema(
+    [
+        ("t", pa.int64()),
+        ("o", pa.float64()),
+        ("h", pa.float64()),
+        ("l", pa.float64()),
+        ("c", pa.float64()),
+        ("v", pa.float64()),
+        ("vw", pa.float64()),
+        ("n", pa.int64()),
+    ]
+)
+MAX_PAGES = 10_000
+
+
+def _utc(day, at=time(0)):
+    return datetime.combine(day, at, NEW_YORK).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _session_day(ns):
+    return datetime.fromtimestamp(ns / 1e9, UTC).astimezone(NEW_YORK).date().isoformat()
+
+
+def _fetch(client, symbol, timeframe, start, end):
+    params = {
+        "timeframe": timeframe,
+        "start": _utc(start),
+        "end": _utc(end, time(23, 59)),
+        "adjustment": "all",
+        "feed": "sip",
+        "sort": "asc",
+        "limit": 10000,
+    }
+    rows, seen = [], set()
+    for _ in range(MAX_PAGES):
+        payload = client.get(f"{DATA_BASE}/v2/stocks/{symbol}/bars", params)
+        if not isinstance(payload, dict):
+            raise TypeError("invalid bars response")
+        rows += payload.get("bars") or []
+        token = payload.get("next_page_token")
+        if not token:
+            return rows
+        if token in seen:
+            raise RuntimeError("pagination token loop")
+        seen.add(token)
+        params = {**params, "page_token": token}
+    raise RuntimeError("pagination page budget exhausted")
+
+
+def _table(rows, timeframe, windows, reserved):
+    t = np.array([parse_timestamp(r["t"]) for r in rows], dtype=np.int64)
+    keep = np.ones(len(t), dtype=bool)
+    if timeframe == "1Min" and len(t):
+        opens = np.array([w.open_ns for w in windows], dtype=np.int64)
+        closes = np.array([w.close_ns for w in windows], dtype=np.int64)
+        index = np.searchsorted(opens, t, side="right") - 1
+        keep = (index >= 0) & (t < closes[np.clip(index, 0, None)])
+    if reserved:
+        keep &= np.array([_session_day(x) not in reserved for x in t], dtype=bool)
+    kept = [r for r, k in zip(rows, keep, strict=True) if k]
+    columns = {
+        "t": t[keep],
+        **{k: np.array([float(r[k]) for r in kept], dtype=np.float64) for k in "ohlcv"},
+        "vw": np.array([float(r.get("vw") or r["c"]) for r in kept], dtype=np.float64),
+        "n": np.array([int(r.get("n") or 0) for r in kept], dtype=np.int64),
+    }
+    order = np.argsort(columns["t"], kind="stable")
+    table = pa.table({k: v[order] for k, v in columns.items()}, schema=SCHEMA)
+    unique = np.concatenate([[True], np.diff(table.column("t").to_numpy()) > 0])
+    return table.filter(pa.array(unique))
+
+
+def download_bars(symbol, timeframe, start, end, root, *, client=None, windows=None):
+    """Write `root/<timeframe>/<SYMBOL>/<YEAR>.parquet`; returns the year files."""
+    if timeframe not in ("1Day", "1Min"):
+        raise ValueError("timeframe must be 1Day or 1Min")
+    client = client or ReadOnlyClient()
+    if windows is None:
+        windows, _ = _calendar(client, start.isoformat(), end.isoformat())
+    reserved = {d for s, d in reserved_final_sessions() if s == symbol}
+    folder = Path(root) / timeframe / symbol
+    folder.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for year in range(start.year, end.year + 1):
+        path = folder / f"{year}.parquet"
+        paths.append(path)
+        if path.exists() and year < end.year:
+            continue  # complete; the latest year is always refreshed
+        first, last = max(start, date(year, 1, 1)), min(end, date(year, 12, 31))
+        rows = _fetch(client, symbol, timeframe, first, last)
+        temporary = path.with_suffix(".parquet.tmp")
+        pq.write_table(_table(rows, timeframe, windows, reserved), temporary)
+        temporary.replace(path)
+    return paths
+
+
+def read_bars(root, timeframe, symbol) -> pa.Table:
+    files = sorted((Path(root) / timeframe / symbol).glob("*.parquet"))
+    if not files:
+        return SCHEMA.empty_table()
+    table = pa.concat_tables([pq.read_table(f, schema=SCHEMA) for f in files])
+    return table.sort_by("t")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--timeframe", choices=["1Day", "1Min"], required=True)
+    parser.add_argument("--root", type=Path, default=Path("data/ml"))
+    parser.add_argument("--symbols", nargs="*", help="default: the whole universe")
+    parser.add_argument("--end", type=date.fromisoformat, default=datetime.now(NEW_YORK).date())
+    args = parser.parse_args(argv)
+    from ..cli import _read_credentials
+
+    _read_credentials()
+    client = ReadOnlyClient()
+    windows, _ = _calendar(client, "2016-01-01", args.end.isoformat())
+    wanted = set(args.symbols or [])
+    for symbol in UNIVERSE:
+        if wanted and symbol.ticker not in wanted:
+            continue
+        started = time_module.monotonic()
+        paths = download_bars(
+            symbol.ticker,
+            args.timeframe,
+            symbol.first_date,
+            args.end,
+            args.root,
+            client=client,
+            windows=windows,
+        )
+        rows = sum(pq.read_metadata(p).num_rows for p in paths)
+        seconds = time_module.monotonic() - started
+        print(f"{symbol.ticker:<6} {args.timeframe} {rows:>9} bars {seconds:6.1f}s", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

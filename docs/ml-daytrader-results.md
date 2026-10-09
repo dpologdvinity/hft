@@ -69,3 +69,26 @@ model learned something from data beyond prices. It still trails holding by abou
 5 bp a day with an interval that includes zero, loses at three times the costs, and
 after 100 trials its Sharpe ratio is not distinguishable from luck. The 30-minute
 GRU again traded rarely and lost. No variant is frozen; the test years stay unseen.
+
+## FinBERT sentiment: 8 more variants (2026-10-09)
+
+All 335,339 headlines were scored with ProsusAI/finbert (revision 4556d13, trained in
+2019 on older text) on a Kaggle GPU. Its pre-open sentiment (mean, maximum and minimum
+over a symbol's focused articles, and the market mean) was added to the news features.
+In the training years, strongly positive pre-open sentiment preceded +4.6 bp from open
+to close and strongly negative -7.2 bp. Trials 101 to 108, held from the open:
+
+| Daily model | Picks | Total | Per trade | 3x costs | Sharpe | Edge vs holding (bp/day, 95% interval) |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Trees, news + sentiment | 3 | +42.6% | +7.9 bp | -18.8% | 1.00 | -6.3 (-16.7 to +3.9) |
+| Network, news + sentiment | 5 | +39.9% | +7.5 bp | -28.8% | 0.93 | -6.6 (-16.2 to +2.9) |
+| Trees, gated, news + sentiment | 5 | +12.7% | +55.7 bp | +9.8% | 0.88 | -11.7 (-21.6 to -1.9) |
+
+Sentiment did not improve on the plain news features (+47.8%). Across the 24 news
+variants the pattern is consistent: daily picks informed by pre-open news earn about
++6 to +10 bp per trade, roughly 20% a year with a Sharpe ratio near 1, yet trail
+holding the same symbols (+97.2%, Sharpe 2.04 in a strong market), lose at three times
+the costs, and after 108 trials are not distinguishable from luck. The gated trees
+traded only 112 times at +55.7 bp, the only variant still positive at 3x costs; with
+so few trades, picked out of 108 tries, it is a lead to test on fresh data, not a
+result. No variant is frozen; the test years stay unseen.

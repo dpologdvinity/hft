@@ -3,6 +3,7 @@ from datetime import datetime
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from hft.calendar import SessionWindow
 from hft.ml.download import SCHEMA
@@ -86,3 +87,12 @@ def test_labels_are_the_return_between_later_opens(tmp_path):
     _, y = windows(store, ["NVDA"], np.array([[0, 0, 100]]), horizon=5)
     data = store["NVDA"]
     assert y[0] == np.float32(np.log(data.open[0, 106] / data.open[0, 101]))
+
+
+def test_minutes_carry_the_opening_gap_and_the_share_of_the_session_elapsed(tmp_path):
+    _write(tmp_path, "NVDA")
+    data = minute_store(tmp_path, ["NVDA"], [FULL, HALF])["NVDA"]
+    gap, time = CHANNELS.index("opening_gap"), CHANNELS.index("time_of_day")
+    assert (data.channels[0, :, gap] == 0).all()  # no earlier session: unknown gap
+    assert data.channels[1, 5, gap] == pytest.approx(np.log(1.0001), rel=1e-3)  # one tick up
+    assert data.channels[1, 105, time] == pytest.approx(105 / 210)  # half day: 210 minutes

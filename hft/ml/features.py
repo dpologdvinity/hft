@@ -141,7 +141,7 @@ def daily_frame(root, symbols, first_dates=None) -> DailyFrame:
 
 MINUTES = 390
 LAST_MINUTE_BEFORE_CLOSE = 5  # positions are flat five minutes before the close
-CHANNELS = ("return", "relative_volume", "vwap_distance", "time_of_day")
+CHANNELS = ("return", "relative_volume", "vwap_distance", "time_of_day", "opening_gap")
 
 
 @dataclass
@@ -153,8 +153,9 @@ class MinuteData:
     channels: np.ndarray  # (n, 390, len(CHANNELS)) float32, causal per minute
 
 
-def _minute_channels(close, volume, vwap, valid):
-    """Per session row: return, relative volume, distance from VWAP, time of day."""
+def _minute_channels(close, volume, vwap, valid, length, gap):
+    """Per session row: return, relative volume, distance from VWAP, share of the session
+    elapsed, and the opening gap (known once the session's first bar printed)."""
     n = len(close)
     filled = np.where(valid, close, np.nan)
     # Carry the last real close forward so a return spans any missing minutes.
@@ -178,8 +179,12 @@ def _minute_channels(close, volume, vwap, valid):
         np.log(carried / np.where(session_vwap > 0, session_vwap, 1)),
         0.0,
     )
-    time_of_day = np.broadcast_to(np.arange(MINUTES) / MINUTES, (n, MINUTES))
-    return np.stack([returns, relative, distance, time_of_day], axis=-1).astype(np.float32)
+    time_of_day = np.arange(MINUTES)[None, :] / np.maximum(length, 1)[:, None]
+    opened = np.cumsum(valid, axis=1) > 0
+    gap_channel = np.where(opened, np.nan_to_num(gap)[:, None], 0.0)
+    return np.stack([returns, relative, distance, time_of_day, gap_channel], axis=-1).astype(
+        np.float32
+    )
 
 
 def minute_store(root, symbols, sessions) -> dict[str, MinuteData]:
@@ -203,12 +208,21 @@ def minute_store(root, symbols, sessions) -> dict[str, MinuteData]:
             values[name] = array
         valid = np.isfinite(values["c"])
         length = ((closes[rows] - opens[rows]) // (60 * 1_000_000_000)).astype(np.int64)
+        first_open = np.array(
+            [o[v][0] if v.any() else np.nan for o, v in zip(values["o"], valid, strict=True)]
+        )
+        last_close = np.array(
+            [c[v][-1] if v.any() else np.nan for c, v in zip(values["c"], valid, strict=True)]
+        )
+        follows = np.concatenate([[False], np.diff(rows) == 1])  # previous calendar session
+        previous = np.where(follows, np.concatenate([[np.nan], last_close[:-1]]), np.nan)
+        gap = np.log(first_open / previous)
         store[symbol] = MinuteData(
             dates=np.array([sessions[r].session_id for r in rows], dtype="datetime64[D]"),
             open=values["o"].astype(np.float32),
             valid=valid,
             last_minute=length - LAST_MINUTE_BEFORE_CLOSE,
-            channels=_minute_channels(values["c"], values["v"], values["vw"], valid),
+            channels=_minute_channels(values["c"], values["v"], values["vw"], valid, length, gap),
         )
     return store
 

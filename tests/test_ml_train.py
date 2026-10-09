@@ -229,3 +229,25 @@ def test_the_final_test_runs_once_on_the_saved_frozen_models(market, tmp_path, m
     weights.write_bytes(weights.read_bytes() + b" ")
     with pytest.raises(ValueError, match="changed"):
         run_final(tmp_path / "search", market, tmp_path / "final2", registry=tmp_path / "r2.json")
+
+
+def test_the_daily_return_target_is_the_move_a_trade_can_capture(market):
+    from hft.ml.train import _daily_target, load_inputs
+
+    inputs = load_inputs(market, ["AAA", "BBB"])
+    labels = _daily_target(inputs, "return")
+    data = inputs.store["AAA"]
+    row = 200
+    day = list(inputs.frame.dates).index(data.dates[row])
+    last = int(data.last_minute[row])
+    expected = np.log(data.open[row, last] / data.open[row, 1])  # 9:31 open to 15:55 open
+    assert labels[day, 0] == pytest.approx(expected, rel=1e-5)
+
+
+def test_trials_count_every_variant_ever_tried_in_a_search_folder(market, tmp_path):
+    from hft.ml.search import run_search
+
+    configs = [{**CONFIG, "minute": {"model": "none"}}]
+    run_search(configs, market, tmp_path, symbols=["AAA", "BBB"], log=lambda _: None)
+    summary = run_search(configs, market, tmp_path, symbols=["AAA", "BBB"], log=lambda _: None)
+    assert summary["trials"] == 2

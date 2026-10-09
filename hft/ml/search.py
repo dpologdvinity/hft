@@ -52,12 +52,13 @@ def run_search(configs, data_root, out, *, symbols=None, log=print):
     out.mkdir(parents=True, exist_ok=True)
     inputs = load_inputs(data_root, symbols)
     cache, results = {}, []
+    log_path = out / "runs.jsonl"
+    earlier = len(log_path.read_text().splitlines()) if log_path.exists() else 0
+    trials = earlier + len(configs)  # every variant ever tried in this search folder
     with open(out / "runs.jsonl", "a") as runs:
         for number, config in enumerate(configs, 1):
             config = {**config, "symbols": symbols}
-            metrics = run_variant(
-                config, data_root, out, trials=len(configs), inputs=inputs, cache=cache
-            )
+            metrics = run_variant(config, data_root, out, trials=trials, inputs=inputs, cache=cache)
             row = {"variant": metrics["variant"], "config": _merge(DEFAULT, config), **metrics}
             runs.write(json.dumps(row) + "\n")
             runs.flush()
@@ -72,7 +73,7 @@ def run_search(configs, data_root, out, *, symbols=None, log=print):
     frozen = [r["variant"] for r in ranked[:TOP]]
     (out / "frozen.json").write_text(json.dumps(frozen, indent=2) + "\n")
     summary = {
-        "trials": len(results),
+        "trials": trials,
         "frozen": frozen,
         "best": {k: ranked[0][k] for k in ("variant", "daily_difference", "beats_holding")}
         if ranked

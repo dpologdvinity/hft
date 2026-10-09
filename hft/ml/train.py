@@ -84,7 +84,18 @@ def _daily_target(inputs, target):
     """Per symbol-day label for the daily model: the open-to-close return, or the day's
     range, a measure of how much a stock moves (stocks "in play" for day trading)."""
     if target == "return":
-        return inputs.frame.label
+        # Trades fill from the second minute's open and are flat by the last minute, so
+        # that is the move to learn; the official open-to-close move is not tradable.
+        out = np.full(inputs.frame.label.shape, np.nan, dtype=np.float32)
+        day_index = {d: i for i, d in enumerate(inputs.frame.dates)}
+        for s, symbol in enumerate(inputs.symbols):
+            data = inputs.store[symbol]
+            last = data.open[np.arange(len(data.dates)), data.last_minute]
+            moves = np.log(last / data.open[:, 1])
+            for r, day in enumerate(data.dates):
+                if day in day_index:
+                    out[day_index[day], s] = moves[r]
+        return np.where(inputs.frame.valid, out, np.nan)
     if target != "range":
         raise ValueError("daily target must be return or range")
     out = np.full(inputs.frame.label.shape, np.nan, dtype=np.float32)
@@ -97,7 +108,7 @@ def _daily_target(inputs, target):
 def _fit_daily(config, frame, labels, train_days, device):
     x = frame.x[train_days]
     y = labels[train_days]
-    keep = frame.valid[train_days]
+    keep = frame.valid[train_days] & np.isfinite(y)  # a missing bar leaves no label
     rows = np.flatnonzero(keep.any(axis=1))
     stop_from = rows[int(len(rows) * 0.85)] if len(rows) else 0  # last 15% stops training
     fit, stop = keep.copy(), keep.copy()

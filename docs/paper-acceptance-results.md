@@ -58,3 +58,34 @@ cents of the reference trade (AAPL 340.55, AMZN 254.22, GOOGL 348.09, JPM 331.64
 KO 87.74, MSFT 522.85, XOM 168.38). The three on-close orders expired (bug 4), so
 BAC, NVDA and PFE hold nothing tonight. The run was restarted with the fixes and
 resumed its saved state and positions. The opening exits are next.
+
+## 2026-10-09: first overnight exits, run stopped
+
+The seven queued day market sells filled between 09:30:01 and 09:33 ET (KO and XOM in
+several partial fills). The fractional positions could not use opening-auction orders,
+so they sold in the first minutes of continuous trading.
+
+| Stock | Bought (10-08 15:57) | Sold (10-09 open) | Net |
+| --- | ---: | ---: | ---: |
+| AAPL | 340.55 | 332.80 | -$11.21 |
+| AMZN | 254.22 | 256.42 | +$4.26 |
+| GOOGL | 348.09 | 350.71 | +$3.71 |
+| JPM | 331.64 | 331.01 | -$0.94 |
+| KO | 87.74 | 87.66-87.70 | -$0.27 |
+| MSFT | 522.85 | 528.18 | +$5.02 |
+| XOM | 168.38 | 167.30-168.13 | -$1.56 |
+
+Total -$0.98 over seven trades (-2.9 bp per trade), one night: no information about
+an edge. The overnight run was stopped at 09:39 ET once flat, so the paper account
+could move to the news-picks forward test (below).
+
+## 2026-10-09: news-picks forward test started
+
+Run `news-picks` started 09:43 ET on the frozen news variant 7f7b87ac489e
+(experiment 16 in the [project history](project-history.md)), all 68 trainable
+symbols at $1,000 each, top three picks a day. It failed validation against holding,
+so this is a forward record on unseen days, not a candidate for real money. Its first
+session is Monday 2026-10-12: data refresh 08:55 ET, picks after 09:30, sells at 15:55.
+Starting it needed two fixes (7da1a49): scheduled runs poll prices over REST, so the
+30-symbol stream limit no longer applies to them (up to 100), and one latest-trades
+request now covers up to 100 symbols.

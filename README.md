@@ -118,8 +118,10 @@ clone shows empty states until local data and experiments exist.
 
 ## Paper trading on your chosen stocks
 
-Trade any 1-30 stocks on your Alpaca **paper** account (simulated money), each with
-its own dollar budget, every trading day until you stop it:
+Trade any 1-30 stocks (up to 100 for the scheduled `overnight-drift` and `news-picks`
+strategies, which poll prices instead of streaming them) on your Alpaca **paper**
+account (simulated money), each with its own dollar budget, every trading day until
+you stop it:
 
 ```bash
 export ALPACA_API_KEY=... ALPACA_SECRET_KEY=...              # free market data

@@ -21,7 +21,7 @@ quote-level replay of this strategy lost about 4-5 bp per round trip
 more generous than the project's simulator; paper profits should not be read as
 achievable live.
 
-## Bugs found and fixed the same day
+## Bugs found and fixed
 
 Each fix has a regression test that fails on the old code.
 
@@ -44,7 +44,6 @@ Each fix has a regression test that fails on the old code.
 5. **Status after a restart.** The newest journal of a restarted run has no equity
    row yet, so status showed holdings as near-total losses. It now reads older
    journals and never shows a holding at zero (1438cc7).
-
 6. **Overnight regulatory fees stopped the overnight run.** At 03:46 ET Alpaca posted
    $0.40 of SEC and CAT fees for the day's intraday sales to the shared account, and
    reconciliation stopped the run on the unexplained cash change. Fee activities are
